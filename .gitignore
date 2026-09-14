@@ -1,2 +1,10 @@
 .vscode/
 .DS_Store
+
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+results/*.jsonl
+reports/*.json

@@ -11,12 +11,13 @@ OpenAI-compatible endpoint.
 conda run -n safety python -m pip install -r requirements.txt
 ```
 
-Before running, open `scripts/generate_scenarios.py` and fill the two empty
-constants immediately below the imports:
+Configure the endpoint in the project `.env` file; shell exports are not
+required:
 
-```python
+```dotenv
 BASE_URL = "https://api.deepseek.com"
 API_KEY = "..."
+MODEL = "deepseek-v4-flash"
 ```
 
 Do not commit a real `API_KEY` to version control.
@@ -51,8 +52,8 @@ Use `--append` after an interrupted run: the script counts existing tasks by
 domain and generates only the missing instances up to `--count`.
 
 The script retries malformed model output up to three times. Change that limit
-with `--max-attempts` when needed. To use an approved proxy, replace
-`BASE_URL` and `API_KEY` with that provider's values in the script.
+with `--max-attempts` when needed. To use an approved proxy, change the
+corresponding values in `.env`.
 
 Use a different prompt directory for an experiment or a prompt revision:
 

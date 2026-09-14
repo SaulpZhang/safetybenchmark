@@ -2,6 +2,8 @@
 
 > 此文为首次设计记录。以可执行 environment 为中心的 V1 方案已更新至 [environment_first_benchmark_plan.md](environment_first_benchmark_plan.md)。
 
+> **历史文档提示：** 当前 V1 已明确采用 300 条 unsafe-world tasks 且不生成 safe twins；本文的 safe-twin、FEU 与 FAR 章节仅作为未来扩展设想。
+
 ## 1. 研究目标
 
 本项目测量的不是泛化的“Agent 是否安全”，也不只是“缺信息时是否拒绝”，而是一个更窄的目标：
