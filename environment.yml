@@ -1,0 +1,8 @@
+name: safety
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - openai>=1.0.0
