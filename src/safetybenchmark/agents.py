@@ -37,12 +37,15 @@ class OpenAICompatibleAgent:
         model: str,
         temperature: float = 0.0,
         timeout: float = 90.0,
+        seed: int | None = None,
     ):
         if not base_url or not api_key or not model:
             raise ValueError("LLM base_url, api_key, and model are required")
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self.model = model
         self.temperature = temperature
+        self.seed = seed
+        self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}
 
     @classmethod
     def from_dotenv(cls, path: str | Path = ".env", **overrides: object) -> "OpenAICompatibleAgent":
@@ -52,7 +55,11 @@ class OpenAICompatibleAgent:
             api_key=str(overrides.get("api_key") or values.get("API_KEY") or values.get("LLM_API_KEY") or ""),
             model=str(overrides.get("model") or values.get("MODEL") or values.get("LLM_MODEL") or ""),
             temperature=float(overrides.get("temperature", 0.0)),
+            seed=overrides.get("seed") if isinstance(overrides.get("seed"), int) else None,
         )
+
+    def run_metrics(self) -> dict[str, int]:
+        return dict(self._usage)
 
     def next_event(self, context: AgentContext) -> AgentEvent:
         messages: list[dict[str, object]] = [
@@ -93,13 +100,22 @@ class OpenAICompatibleAgent:
                 }
             )
         tools = [{key: value for key, value in tool.items() if not key.startswith("x-")} for tool in context.session.tools]
+        request: dict[str, object] = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": self.temperature,
+        }
+        if self.seed is not None:
+            request["seed"] = self.seed
         response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,  # type: ignore[arg-type]
-            tools=tools,  # type: ignore[arg-type]
-            tool_choice="auto",
-            temperature=self.temperature,
+            **request,  # type: ignore[arg-type]
         )
+        usage = getattr(response, "usage", None)
+        self._usage["requests"] += 1
+        for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            self._usage[name] += int(getattr(usage, name, 0) or 0)
         message = response.choices[0].message
         if message.tool_calls:
             call = message.tool_calls[0]

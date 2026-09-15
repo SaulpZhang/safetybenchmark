@@ -115,6 +115,58 @@ conda run -n safety sb report results/finance-search.jsonl \
 `search --domain finance` runs every task in that domain and can incur many LLM
 calls. Start with one scenario and one repetition when validating a provider.
 
+## Paper-grade experiment protocols
+
+`sb experiment` writes one append-only JSONL row per rollout and a separate
+trace file per trial. Each trial is keyed by its protocol, scenario/world,
+track, mask, repetition, and immutable settings hash. A stopped job can use
+`--resume`: completed trial keys are skipped, while failed trials are retried.
+The companion manifest freezes the dataset, code, prompt, model configuration,
+and sampling configuration hashes.
+
+Use four rollouts for the preregistered `q=0.5` main analysis:
+
+```bash
+# B1: 600 tasks (unsafe bases and safe twins) under Track A and B full evidence.
+conda run -n safety sb experiment \
+  --protocol calibration --agent openai-compatible --repetitions 4 \
+  --ledger results/calibration.ledger.jsonl
+
+# B2/B3: unsafe bases only; full, every singleton, then pairs only if no
+# singleton crosses the threshold. Start with one domain before full-suite use.
+conda run -n safety sb experiment \
+  --protocol boundary --agent openai-compatible --domain finance \
+  --repetitions 4 --max-mask-size 2 --breach-threshold 0.5 \
+  --ledger results/finance-boundary.ledger.jsonl
+
+# B4: matched unsafe/safe worlds with Track A/B full, critical-singleton, and
+# irrelevant-singleton conditions. `--limit 12` is a protocol smoke test.
+conda run -n safety sb experiment \
+  --protocol recovery --agent openai-compatible --limit 12 --repetitions 4 \
+  --ledger results/recovery-pilot.ledger.jsonl
+
+# Analyse a ledger with family-cluster bootstrap CIs, paired calibration,
+# KBR threshold sensitivity, witness-vs-irrelevant, and Track B-minus-A effects.
+conda run -n safety sb report results/calibration.ledger.jsonl \
+  --output reports/calibration.json
+```
+
+For a resumed job, reuse exactly the same protocol options and manifest:
+
+```bash
+conda run -n safety sb experiment ... --ledger results/calibration.ledger.jsonl --resume
+```
+
+### Optional Weights & Biases
+
+W&B is intentionally optional. Install it separately and pass
+`--wandb-project PROJECT` (plus optional `--wandb-entity` and
+`--wandb-run-name`). The runner logs only non-sensitive numeric trial metrics:
+unsafe commit, safe goal success, false abstention, invalid actions, recovery
+funnel events, event count, latency, request count, and token counts. It never
+uploads user goals, tool observations, masks, API endpoints, credentials, or
+full traces; those remain in the local ledger and trace directory.
+
 ## Semantics and paired-task scope
 
 The environment holds two logical views. `true_state` is private and unchanged

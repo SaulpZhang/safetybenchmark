@@ -166,6 +166,7 @@ class RunSpec(StrictModel):
     intervention: Literal["semantic_suppression", "channel_omission"] = "semantic_suppression"
     max_steps: int = Field(default=12, ge=1)
     run_id: str | None = None
+    seed: int | None = None
 
 
 class ToolCall(StrictModel):

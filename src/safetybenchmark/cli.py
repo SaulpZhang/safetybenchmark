@@ -9,6 +9,7 @@ from pathlib import Path
 from .agents import Agent, BlindCommitAgent, OpenAICompatibleAgent, SafeReferenceAgent
 from .data import ScenarioRepository
 from .environment import SafetyEnvironment
+from .experiments import ExperimentSettings, run_protocol
 from .models import RunSpec
 from .reporting import read_jsonl, summarize
 from .rule_predicates import audit_rule_inversions
@@ -23,13 +24,13 @@ def intervention_for_track(track: str) -> str:
     return "semantic_suppression" if track == "a" else "channel_omission"
 
 
-def agent_factory(name: str, dotenv: Path, temperature: float) -> Callable[[], Agent]:
+def agent_factory(name: str, dotenv: Path, temperature: float, seed: int | None = None) -> Callable[[], Agent]:
     if name == "safe-reference":
         return SafeReferenceAgent
     if name == "blind-commit":
         return BlindCommitAgent
     if name == "openai-compatible":
-        return lambda: OpenAICompatibleAgent.from_dotenv(dotenv, temperature=temperature)
+        return lambda: OpenAICompatibleAgent.from_dotenv(dotenv, temperature=temperature, seed=seed)
     raise ValueError(f"unknown agent: {name}")
 
 
@@ -66,6 +67,26 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--temperature", type=float, default=0.0)
     search.add_argument("--dotenv", type=Path, default=Path(".env"))
     search.add_argument("--output", type=Path, default=Path("results/search.jsonl"))
+
+    experiment = subparsers.add_parser("experiment", help="Run a resume-safe paper experiment protocol")
+    experiment.add_argument("--protocol", choices=("calibration", "boundary", "recovery"), required=True)
+    experiment.add_argument("--agent", choices=("safe-reference", "blind-commit", "openai-compatible"), default="openai-compatible")
+    experiment.add_argument("--domain")
+    experiment.add_argument("--scenario")
+    experiment.add_argument("--limit", type=int, help="Maximum scenarios (unsafe bases for boundary/recovery)")
+    experiment.add_argument("--repetitions", type=int, default=4)
+    experiment.add_argument("--max-mask-size", type=int, choices=(1, 2, 3), default=2)
+    experiment.add_argument("--breach-threshold", type=float, default=0.5)
+    experiment.add_argument("--max-steps", type=int, default=12)
+    experiment.add_argument("--temperature", type=float, default=0.0)
+    experiment.add_argument("--seed", type=int)
+    experiment.add_argument("--dotenv", type=Path, default=Path(".env"))
+    experiment.add_argument("--ledger", type=Path, required=True)
+    experiment.add_argument("--manifest", type=Path)
+    experiment.add_argument("--resume", action="store_true")
+    experiment.add_argument("--wandb-project")
+    experiment.add_argument("--wandb-entity")
+    experiment.add_argument("--wandb-run-name")
 
     report = subparsers.add_parser("report", help="Summarize episode or search JSONL")
     report.add_argument("input", type=Path)
@@ -147,6 +168,49 @@ def main(argv: list[str] | None = None) -> int:
                     ensure_ascii=False,
                 )
             )
+        return 0
+    if args.command == "experiment":
+        if args.repetitions < 1:
+            raise ValueError("--repetitions must be positive")
+        if not 0 < args.breach_threshold <= 1:
+            raise ValueError("--breach-threshold must be in (0, 1]")
+        settings = ExperimentSettings(
+            protocol=args.protocol,
+            repetitions=args.repetitions,
+            max_mask_size=args.max_mask_size,
+            breach_threshold=args.breach_threshold,
+            max_steps=args.max_steps,
+            temperature=args.temperature,
+            seed=args.seed,
+            domain=args.domain,
+            scenario_id=args.scenario,
+            limit=args.limit,
+        )
+        manifest = args.manifest or args.ledger.with_suffix(".manifest.json")
+        metadata: dict[str, object] = {
+            "adapter": args.agent,
+            "temperature": args.temperature,
+            "seed": args.seed,
+        }
+        if args.agent == "openai-compatible":
+            from .agents import load_dotenv
+
+            values = load_dotenv(args.dotenv)
+            metadata["model"] = values.get("MODEL") or values.get("LLM_MODEL") or "unknown"
+        result = run_protocol(
+            repository,
+            args.dataset,
+            args.ledger,
+            manifest,
+            settings,
+            metadata,
+            lambda trial_seed: agent_factory(args.agent, args.dotenv, args.temperature, trial_seed)(),
+            resume=args.resume,
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            wandb_run_name=args.wandb_run_name,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     return 2
 
