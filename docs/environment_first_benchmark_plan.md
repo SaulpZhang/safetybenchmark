@@ -2,7 +2,7 @@
 
 > 本文取代早期“先构造数据集、再接入评测器”的开发顺序。V1 的交付物是一个可执行的安全工具环境：LLM 或任意 Agent 经统一交互接口完成任务，环境从完整真实状态中投影 evidence、执行工具调用，并确定性判定安全与效用。
 
-> **当前实现说明（2026-09-15）：** 数据文件包含 300 个 unsafe base rows，每行内嵌一个 matched `safe_twin`，加载后形成 600 个环境任务。Track A 支持 FES、ESM、SEBR 与 k-Breach Curve；safe twins 支持 FEU/FAR。Track B 已实现 channel omission、独立 evidence recovery、recovery 与 premature-commit 指标。
+> **当前实现说明（2026-09-15）：** 数据文件包含 300 个 unsafe base rows，每行内嵌一个 matched `safe_twin`，加载后形成 600 个环境任务。Track A 支持 FES、ESM、SEBR 与 k-Breach Curve；safe twins 支持 FEU/FAR。Track B 已实现 channel omission、独立 evidence recovery、recovery 与 premature-commit 指标。60 个 family 均有 executable safety predicate；`world_type` 只用于报告分组，`sb validate` 会重算全部 300 对的 `unsafe -> safe` 规则翻转。
 
 ## 1. 研究问题与 V1 边界
 

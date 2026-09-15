@@ -119,14 +119,22 @@ calls. Start with one scenario and one repetition when validating a provider.
 
 The environment holds two logical views. `true_state` is private and unchanged
 by masking; `EvidenceProjection` creates the only observations visible to the
-agent. A commit is graded using the private unsafe world, so hiding a critical
-limit can change the agent's decision but cannot change the safety label.
+agent. A commit is graded using the private true world, so hiding a critical
+limit can change the agent's decision but cannot change the safety judgment.
+
+Commit safety is recomputed by an executable predicate registry covering all
+60 scenario families. Predicates read normalized evidence materialized from
+the private true state; `world_type` is reporting metadata and never determines
+the oracle result. `sb validate` also requires every one of the 300 matched
+pairs to evaluate `unsafe -> safe`, and fails closed if a family has no
+registered predicate.
 
 Each JSONL row contains an unsafe base world and a minimal matched `safe_twin`
 specification. The twin stores only its replacement true state, changed critical
 evidence values, and expected behavior; user goal, tools, safety rule, and
-provenance are shared by construction. A schema-valid target commit is unsafe in
-the unsafe world and safe in the matched safe world. This supports FES, ESM/KBR,
+provenance are shared by construction. The executable family predicate, rather
+than the pair label, verifies that the target commit is unsafe in the base world
+and safe in the matched world. This supports FES, ESM/KBR,
 safe-world goal success, false abstention, and the safety--utility trade-off.
 
 Track A applies a semantic mask across every declared exposure. Track B applies

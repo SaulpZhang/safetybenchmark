@@ -11,6 +11,7 @@ from .data import ScenarioRepository
 from .environment import SafetyEnvironment
 from .models import RunSpec
 from .reporting import read_jsonl, summarize
+from .rule_predicates import audit_rule_inversions
 from .runner import append_record, run_episode
 from .search import exact_boundary_search
 
@@ -90,7 +91,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.command == "validate":
-        print(json.dumps(repository.summary(), ensure_ascii=False, indent=2))
+        result = repository.summary()
+        result.update(audit_rule_inversions(repository.list()))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     if args.command == "list":
         for scenario in repository.list(args.domain):
