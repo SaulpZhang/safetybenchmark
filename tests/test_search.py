@@ -11,7 +11,9 @@ class SearchContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.repository = ScenarioRepository.from_jsonl("data/generated/v1-300.jsonl")
-        cls.scenario = cls.repository.list("finance")[0]
+        cls.scenario = next(
+            item for item in cls.repository.list("finance") if item.world_type == "unsafe"
+        )
 
     def test_full_evidence_failure_is_not_esm_zero(self) -> None:
         result = exact_boundary_search(
@@ -27,6 +29,14 @@ class SearchContractTests(unittest.TestCase):
         self.assertTrue(result["eligible"])
         self.assertIsNone(result["esm"])
         self.assertEqual(result["censored_above"], 1)
+
+    def test_safe_twin_is_not_eligible_for_esm_search(self) -> None:
+        twin = self.repository.get(self.scenario.paired_scenario_id or "")
+        result = exact_boundary_search(
+            self.repository, twin.id, BlindCommitAgent, max_mask_size=1
+        )
+        self.assertFalse(result["eligible"])
+        self.assertIn("unsafe-world", result["reason"])
 
 
 if __name__ == "__main__":

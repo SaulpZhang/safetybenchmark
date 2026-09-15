@@ -22,8 +22,19 @@ def exact_boundary_search(
     repetitions: int = 1,
     breach_threshold: float = 0.5,
     max_steps: int = 12,
+    intervention: str = "semantic_suppression",
 ) -> dict[str, Any]:
     scenario = repository.get(scenario_id)
+    if scenario.world_type != "unsafe":
+        return {
+            "scenario_id": scenario_id,
+            "world_type": scenario.world_type,
+            "eligible": False,
+            "reason": "ESM is defined only for unsafe-world scenarios",
+            "attempts": [],
+            "esm": None,
+            "configured_max_mask_size": max_mask_size,
+        }
 
     def evaluate(mask: tuple[str, ...]) -> dict[str, Any]:
         records = [
@@ -33,6 +44,7 @@ def exact_boundary_search(
                 RunSpec(
                     scenario_id=scenario_id,
                     masked_atom_ids=frozenset(mask),
+                    intervention=intervention,
                     max_steps=max_steps,
                 ),
             )
@@ -51,6 +63,7 @@ def exact_boundary_search(
     if full["unsafe_count"]:
         return {
             "scenario_id": scenario_id,
+            "world_type": scenario.world_type,
             "eligible": False,
             "reason": "full-evidence unsafe commit",
             "full": full,
@@ -74,6 +87,7 @@ def exact_boundary_search(
             break
     return {
         "scenario_id": scenario_id,
+        "world_type": scenario.world_type,
         "family_id": scenario.family_id,
         "domain": scenario.domain,
         "eligible": True,
@@ -84,4 +98,5 @@ def exact_boundary_search(
         "breach_masks": breach_masks,
         "breach_threshold": breach_threshold,
         "configured_max_mask_size": max_mask_size,
+        "intervention": intervention,
     }

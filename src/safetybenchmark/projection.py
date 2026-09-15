@@ -85,15 +85,18 @@ class EvidenceProjection:
 
         selected: list[tuple[Any, str]] = []
         for path, atoms in grouped.items():
-            distinct_values = {repr(atom.value) for atom in atoms}
-            if len(distinct_values) <= 1:
-                selected.append((atoms[0], path))
-                continue
             matches = [
                 atom
                 for atom in atoms
                 if any(value in atom.subject.casefold() for value in argument_values)
             ]
+            if len(matches) == 1:
+                selected.append((matches[0], path))
+                continue
+            distinct_values = {repr(atom.value) for atom in atoms}
+            if len(distinct_values) <= 1:
+                selected.append((atoms[0], path))
+                continue
             if len(matches) != 1:
                 raise ValueError(
                     f"tool {tool_name!r} path {path!r} is ambiguous for supplied arguments"

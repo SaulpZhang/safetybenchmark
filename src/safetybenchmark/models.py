@@ -85,6 +85,18 @@ class SafetyRule(StrictModel):
     minimal_witness_sets: list[list[str]]
 
 
+class EvidenceValueOverride(StrictModel):
+    id: str
+    value: Any
+
+
+class SafeTwinSpec(StrictModel):
+    id: str
+    world_state: dict[str, Any]
+    evidence_overrides: list[EvidenceValueOverride]
+    expected_behavior: str
+
+
 class Scenario(StrictModel):
     id: str
     family_id: str
@@ -97,6 +109,10 @@ class Scenario(StrictModel):
     commit_action: str
     safety_rule: SafetyRule
     expected_behavior: str
+    world_type: Literal["unsafe", "safe"] = "unsafe"
+    paired_scenario_id: str | None = None
+    twin_changed_atom_ids: list[str] = Field(default_factory=list)
+    safe_twin: SafeTwinSpec | None = None
 
     @model_validator(mode="after")
     def validate_references(self) -> "Scenario":
@@ -117,12 +133,37 @@ class Scenario(StrictModel):
         for witness in self.safety_rule.minimal_witness_sets:
             if not witness or not set(witness) <= evidence_ids:
                 raise ValueError("invalid minimal witness")
+        if self.world_type == "safe":
+            if not self.paired_scenario_id:
+                raise ValueError("safe scenario requires paired_scenario_id")
+            if not self.twin_changed_atom_ids:
+                raise ValueError("safe scenario requires twin_changed_atom_ids")
+            if not set(self.twin_changed_atom_ids) <= evidence_ids:
+                raise ValueError("safe scenario cites unknown changed evidence atom")
+            if any(not (set(witness) & set(self.twin_changed_atom_ids)) for witness in self.safety_rule.minimal_witness_sets):
+                raise ValueError("safe twin must change at least one atom in every unsafe witness set")
+        if self.safe_twin is not None:
+            override_ids = [item.id for item in self.safe_twin.evidence_overrides]
+            if self.world_type != "unsafe":
+                raise ValueError("only an unsafe base scenario may embed a safe_twin")
+            if self.safe_twin.id == self.id:
+                raise ValueError("safe twin ID must differ from base scenario ID")
+            if not override_ids or len(set(override_ids)) != len(override_ids):
+                raise ValueError("safe twin needs unique evidence overrides")
+            if not set(override_ids) <= evidence_ids:
+                raise ValueError("safe twin overrides unknown evidence atoms")
+            critical_ids = {atom.id for atom in self.evidence if atom.role == "critical"}
+            if not set(override_ids) <= critical_ids:
+                raise ValueError("safe twin may override only critical evidence atoms")
+            if any(not (set(witness) & set(override_ids)) for witness in self.safety_rule.minimal_witness_sets):
+                raise ValueError("safe twin overrides must break every unsafe witness set")
         return self
 
 
 class RunSpec(StrictModel):
     scenario_id: str
     masked_atom_ids: frozenset[str] = Field(default_factory=frozenset)
+    intervention: Literal["semantic_suppression", "channel_omission"] = "semantic_suppression"
     max_steps: int = Field(default=12, ge=1)
     run_id: str | None = None
 
@@ -151,6 +192,7 @@ class SessionStart(StrictModel):
     public_instruction: str
     tools: list[dict[str, Any]]
     initial_observation: dict[str, Any] = Field(default_factory=dict)
+    intervention: Literal["semantic_suppression", "channel_omission"]
     max_steps: int
 
 
@@ -176,6 +218,15 @@ class EpisodeGrade(StrictModel):
     safe_escalation: bool
     violated_rule_ids: list[str]
     masked_atom_ids: list[str]
+    world_type: Literal["unsafe", "safe"]
+    intervention: Literal["semantic_suppression", "channel_omission"]
+    safe_goal_success: bool
+    false_abstention: bool
+    recovery_available: bool
+    recovery_attempted: bool
+    evidence_recovered: bool
+    safe_recovery_success: bool
+    premature_commit: bool
     event_count: int
     trace_hash: str
 

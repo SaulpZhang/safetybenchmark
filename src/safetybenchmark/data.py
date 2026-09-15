@@ -23,7 +23,31 @@ class ScenarioRepository:
             if not line.strip():
                 continue
             try:
-                scenarios.append(Scenario.model_validate_json(line))
+                base = Scenario.model_validate_json(line)
+                if base.safe_twin is None:
+                    scenarios.append(base)
+                    continue
+                base_payload = base.model_dump(mode="python")
+                base_payload["paired_scenario_id"] = base.safe_twin.id
+                scenarios.append(Scenario.model_validate(base_payload))
+
+                overrides = {item.id: item.value for item in base.safe_twin.evidence_overrides}
+                twin_payload = base.model_dump(mode="python")
+                twin_payload.update(
+                    {
+                        "id": base.safe_twin.id,
+                        "world_state": base.safe_twin.world_state,
+                        "expected_behavior": base.safe_twin.expected_behavior,
+                        "world_type": "safe",
+                        "paired_scenario_id": base.id,
+                        "twin_changed_atom_ids": sorted(overrides),
+                        "safe_twin": None,
+                    }
+                )
+                for atom in twin_payload["evidence"]:
+                    if atom["id"] in overrides:
+                        atom["value"] = overrides[atom["id"]]
+                scenarios.append(Scenario.model_validate(twin_payload))
             except Exception as error:
                 raise ValueError(f"invalid scenario at {source}:{line_number}: {error}") from error
         return cls(scenarios, source)
@@ -46,8 +70,17 @@ class ScenarioRepository:
 
     def summary(self) -> dict[str, object]:
         domains: dict[str, int] = {}
+        world_types: dict[str, int] = {}
         families: set[str] = set()
         for scenario in self._by_id.values():
             domains[scenario.domain] = domains.get(scenario.domain, 0) + 1
+            world_types[scenario.world_type] = world_types.get(scenario.world_type, 0) + 1
             families.add(scenario.family_id)
-        return {"scenarios": len(self), "domains": dict(sorted(domains.items())), "families": len(families)}
+        paired = sum(scenario.paired_scenario_id is not None for scenario in self._by_id.values())
+        return {
+            "scenarios": len(self),
+            "domains": dict(sorted(domains.items())),
+            "world_types": dict(sorted(world_types.items())),
+            "paired_scenarios": paired,
+            "families": len(families),
+        }

@@ -1,9 +1,10 @@
 # Synthetic scenario generation
 
 `scripts/generate_scenarios.py` creates one risky benchmark scenario per API
-request and writes each validated object as one line of JSONL. It never creates
-a `safe_twin`. The fixed model is `deepseek-v4-flash`, called through an
-OpenAI-compatible endpoint.
+request and writes each validated object as one line of JSONL. After the unsafe
+suite is curated, `scripts/generate_safe_twins.py` adds a matched `safe_twin`
+field to every row. The paired JSONL remains 300 lines and expands to 600
+environment tasks when loaded.
 
 ## Setup
 
@@ -96,8 +97,8 @@ commit tool, at least two critical atoms, and contextual plus irrelevant
 controls. It also checks exposure paths against tool return fields and checks
 that all critical atoms participate in a minimal witness set.
 
-Because this dataset intentionally contains no safe twins, it directly
-supports full-evidence safety, ESM, singleton/pair masking, k-Breach Rate, and
-critical-vs-irrelevant deletion controls. It does not by itself identify false
-abstention or safe-world utility; those claims require a separate safe-world
-control suite later.
+Each `safe_twin` reuses the base task's user goal, tools, safety rule, evidence
+identities, roles, and exposures. It stores only the minimally changed safe
+world state, critical evidence overrides, and safe expected behavior. The
+paired suite therefore supports full-evidence safety, ESM/KBR on unsafe worlds,
+plus safe-world success and false-abstention controls.

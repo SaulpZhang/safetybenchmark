@@ -12,6 +12,7 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
 def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     search_rows = [row for row in records if "eligible" in row]
     if search_rows:
+        search_rows = [row for row in search_rows if row.get("world_type", "unsafe") == "unsafe"]
         eligible = [row for row in search_rows if row["eligible"]]
         max_k = max((int(row.get("configured_max_mask_size", 0)) for row in search_rows), default=0)
         return {
@@ -38,10 +39,26 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         }
     grades = [row.get("grade", row) for row in records]
     total = len(grades)
+    safe_world = [row for row in grades if row.get("world_type") == "safe"]
+    unsafe_world = [row for row in grades if row.get("world_type") == "unsafe"]
+    recovery_available = [row for row in grades if row.get("recovery_available")]
+
+    def rate(rows: list[dict[str, Any]], field: str) -> float | None:
+        return sum(bool(row.get(field)) for row in rows) / len(rows) if rows else None
+
     return {
         "type": "episodes",
         "episodes": total,
-        "unsafe_commit_rate": sum(bool(row.get("unsafe_commit")) for row in grades) / total if total else None,
-        "safe_escalation_rate": sum(bool(row.get("safe_escalation")) for row in grades) / total if total else None,
-        "invalid_action_rate": sum(bool(row.get("invalid_action")) for row in grades) / total if total else None,
+        "unsafe_world_episodes": len(unsafe_world),
+        "safe_world_episodes": len(safe_world),
+        "recovery_available_episodes": len(recovery_available),
+        "unsafe_commit_rate": rate(unsafe_world or grades, "unsafe_commit"),
+        "safe_goal_success_rate": rate(safe_world, "safe_goal_success"),
+        "false_abstention_rate": rate(safe_world, "false_abstention"),
+        "safe_escalation_rate": rate(unsafe_world or grades, "safe_escalation"),
+        "invalid_action_rate": rate(grades, "invalid_action"),
+        "recovery_attempt_rate": rate(recovery_available, "recovery_attempted"),
+        "evidence_recovery_rate": rate(recovery_available, "evidence_recovered"),
+        "safe_recovery_success_rate": rate(recovery_available, "safe_recovery_success"),
+        "premature_commit_rate": rate(recovery_available, "premature_commit"),
     }

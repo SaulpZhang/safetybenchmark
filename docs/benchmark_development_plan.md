@@ -2,7 +2,7 @@
 
 > 此文为首次设计记录。以可执行 environment 为中心的 V1 方案已更新至 [environment_first_benchmark_plan.md](environment_first_benchmark_plan.md)。
 
-> **历史文档提示：** 当前 V1 已明确采用 300 条 unsafe-world tasks 且不生成 safe twins；本文的 safe-twin、FEU 与 FAR 章节仅作为未来扩展设想。
+> **实现更新（2026-09-15）：** 当前 JSONL 包含 300 个 unsafe base rows，每行内嵌 matched `safe_twin`，由 repository 展开为 600 个任务；FEU/FAR 与 Track B channel recovery 已进入实现。
 
 ## 1. 研究目标
 

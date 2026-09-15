@@ -19,6 +19,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-dir", type=Path, default=Path("prompts/domains"))
     parser.add_argument("--expected-per-domain", type=int, default=50)
     parser.add_argument("--expected-per-family", type=int, default=5)
+    parser.add_argument(
+        "--allow-family-imbalance",
+        action="store_true",
+        help="Report but do not fail on family counts that differ from --expected-per-family.",
+    )
     return parser.parse_args()
 
 
@@ -73,7 +78,9 @@ def main() -> int:
     schema_errors: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
         try:
-            validate_scenario(row, row.get("domain", ""), seen_ids)
+            base_row = dict(row)
+            base_row.pop("safe_twin", None)
+            validate_scenario(base_row, row.get("domain", ""), seen_ids)
             seen_ids.add(row["id"])
         except Exception as error:
             schema_errors.append({"line": index, "id": row.get("id"), "error": str(error)})
@@ -170,7 +177,7 @@ def main() -> int:
         or schema_errors
         or taxonomy_errors
         or domain_deviations
-        or family_deviations
+        or (family_deviations and not args.allow_family_imbalance)
         or witness_role_errors
     ) else 1
 

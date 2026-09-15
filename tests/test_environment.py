@@ -27,11 +27,25 @@ class EnvironmentContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.repository = ScenarioRepository.from_jsonl(DATASET)
-        cls.scenario = cls.repository.list("finance")[0]
+        cls.scenario = next(
+            item for item in cls.repository.list("finance") if item.world_type == "unsafe"
+        )
 
     def test_all_generated_scenarios_load(self) -> None:
-        self.assertEqual(len(self.repository), 300)
+        self.assertEqual(len(self.repository), 600)
         self.assertEqual(self.repository.summary()["families"], 60)
+        self.assertEqual(self.repository.summary()["world_types"], {"safe": 300, "unsafe": 300})
+
+    def test_every_scenario_has_a_symmetric_matched_twin(self) -> None:
+        for scenario in self.repository.list():
+            self.assertIsNotNone(scenario.paired_scenario_id)
+            twin = self.repository.get(scenario.paired_scenario_id or "")
+            with self.subTest(scenario=scenario.id):
+                self.assertEqual(twin.paired_scenario_id, scenario.id)
+                self.assertNotEqual(twin.world_type, scenario.world_type)
+                self.assertEqual(twin.family_id, scenario.family_id)
+                self.assertEqual(twin.user_goal, scenario.user_goal)
+                self.assertEqual(twin.tools, scenario.tools)
 
     def test_all_full_evidence_exposures_are_renderable(self) -> None:
         for scenario in self.repository.list():
@@ -135,6 +149,87 @@ class EnvironmentContractTests(unittest.TestCase):
         self.assertFalse(full.grade.invalid_action)
         self.assertFalse(masked.grade.invalid_action)
         self.assertEqual(full.grade.violated_rule_ids, masked.grade.violated_rule_ids)
+
+    def test_safe_twin_commit_is_safe_goal_success(self) -> None:
+        twin = self.repository.get(self.scenario.paired_scenario_id or "")
+        record = run_episode(
+            BlindCommitAgent(),
+            SafetyEnvironment(self.repository),
+            RunSpec(scenario_id=twin.id, max_steps=1),
+        )
+        self.assertFalse(record.grade.unsafe_commit)
+        self.assertTrue(record.grade.safe_goal_success)
+        self.assertFalse(record.grade.false_abstention)
+
+    def test_safe_twin_abstention_is_counted_as_false_abstention(self) -> None:
+        twin = self.repository.get(self.scenario.paired_scenario_id or "")
+        record = run_episode(
+            SafeReferenceAgent(),
+            SafetyEnvironment(self.repository),
+            RunSpec(scenario_id=twin.id, max_steps=12),
+        )
+        self.assertFalse(record.grade.safe_goal_success)
+        self.assertTrue(record.grade.false_abstention)
+
+    def test_track_b_hides_primary_channel_and_recovers_from_independent_source(self) -> None:
+        atom = next(item for item in self.scenario.evidence if item.role == "critical")
+        exposure = atom.exposures[0]
+        environment = SafetyEnvironment(self.repository)
+        session = environment.reset(
+            RunSpec(
+                scenario_id=self.scenario.id,
+                masked_atom_ids=frozenset({atom.id}),
+                intervention="channel_omission",
+            )
+        )
+        self.assertIn("recover_omitted_evidence", {tool["function"]["name"] for tool in session.tools})
+        tool = next(item for item in self.scenario.tools if item.name == exposure.tool)
+        arguments = {
+            item.name: ({"number": 0, "boolean": False, "array": [], "object": {}}.get(
+                json_type(item.type), "target"
+            ))
+            for item in tool.parameters
+            if item.required
+        }
+        environment.step(ToolCall(name=tool.name, arguments=arguments))
+        recovered = environment.step(ToolCall(name="recover_omitted_evidence", arguments={}))
+        self.assertEqual(recovered.observation["status"], "recovered")  # type: ignore[index]
+        self.assertIn(atom.value, [item["value"] for item in recovered.observation["evidence"]])  # type: ignore[index]
+        environment.step(ToolCall(name=self.scenario.commit_action, arguments=self._commit_arguments()))
+        grade = environment.grade()
+        self.assertTrue(grade.recovery_attempted)
+        self.assertTrue(grade.evidence_recovered)
+        self.assertFalse(grade.premature_commit)
+
+    def test_track_b_commit_before_recovery_is_premature(self) -> None:
+        atom = next(item for item in self.scenario.evidence if item.role == "critical")
+        record = run_episode(
+            BlindCommitAgent(),
+            SafetyEnvironment(self.repository),
+            RunSpec(
+                scenario_id=self.scenario.id,
+                masked_atom_ids=frozenset({atom.id}),
+                intervention="channel_omission",
+                max_steps=1,
+            ),
+        )
+        self.assertTrue(record.grade.unsafe_commit)
+        self.assertTrue(record.grade.premature_commit)
+        self.assertFalse(record.grade.recovery_attempted)
+
+    def test_track_a_does_not_expose_recovery_tool(self) -> None:
+        session = SafetyEnvironment(self.repository).reset(RunSpec(scenario_id=self.scenario.id))
+        self.assertNotIn("recover_omitted_evidence", {tool["function"]["name"] for tool in session.tools})
+
+    def _commit_arguments(self) -> dict[str, object]:
+        tool = next(item for item in self.scenario.tools if item.name == self.scenario.commit_action)
+        return {
+            item.name: ({"number": 0, "boolean": False, "array": [], "object": {}}.get(
+                json_type(item.type), "benchmark-target"
+            ))
+            for item in tool.parameters
+            if item.required
+        }
 
     def test_safe_reference_agent_escalates_without_commit(self) -> None:
         record = run_episode(

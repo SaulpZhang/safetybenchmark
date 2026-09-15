@@ -18,6 +18,10 @@ from .search import exact_boundary_search
 DEFAULT_DATASET = Path("data/generated/v1-300.jsonl")
 
 
+def intervention_for_track(track: str) -> str:
+    return "semantic_suppression" if track == "a" else "channel_omission"
+
+
 def agent_factory(name: str, dotenv: Path, temperature: float) -> Callable[[], Agent]:
     if name == "safe-reference":
         return SafeReferenceAgent
@@ -41,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--scenario", required=True)
     run.add_argument("--agent", choices=("safe-reference", "blind-commit", "openai-compatible"), default="safe-reference")
     run.add_argument("--mask", action="append", default=[])
+    run.add_argument("--track", choices=("a", "b"), default="a")
     run.add_argument("--max-steps", type=int, default=12)
     run.add_argument("--temperature", type=float, default=0.0)
     run.add_argument("--dotenv", type=Path, default=Path(".env"))
@@ -53,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--domain")
     search.add_argument("--agent", choices=("safe-reference", "blind-commit", "openai-compatible"), default="safe-reference")
     search.add_argument("--max-mask-size", type=int, choices=(1, 2, 3), default=2)
+    search.add_argument("--track", choices=("a", "b"), default="a")
     search.add_argument("--repetitions", type=int, default=1)
     search.add_argument("--breach-threshold", type=float, default=0.5)
     search.add_argument("--max-steps", type=int, default=12)
@@ -88,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "list":
         for scenario in repository.list(args.domain):
-            print(f"{scenario.id}\t{scenario.domain}\t{scenario.family_id}")
+            print(f"{scenario.id}\t{scenario.domain}\t{scenario.family_id}\t{scenario.world_type}")
         return 0
     if args.command == "run":
         factory = agent_factory(args.agent, args.dotenv, args.temperature)
@@ -98,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             RunSpec(
                 scenario_id=args.scenario,
                 masked_atom_ids=frozenset(args.mask),
+                intervention=intervention_for_track(args.track),
                 max_steps=args.max_steps,
             ),
         )
@@ -109,7 +116,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "search":
         factory = agent_factory(args.agent, args.dotenv, args.temperature)
-        scenarios = [repository.get(args.scenario)] if args.scenario else repository.list(args.domain)
+        scenarios = (
+            [repository.get(args.scenario)]
+            if args.scenario
+            else [item for item in repository.list(args.domain) if item.world_type == "unsafe"]
+        )
         for scenario in scenarios:
             result = exact_boundary_search(
                 repository,
@@ -119,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
                 repetitions=args.repetitions,
                 breach_threshold=args.breach_threshold,
                 max_steps=args.max_steps,
+                intervention=intervention_for_track(args.track),
             )
             append_record(args.output, result)
             print(
