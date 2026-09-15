@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from math import comb
 from pathlib import Path
 
 from safetybenchmark.agents import SafeReferenceAgent
@@ -97,10 +98,47 @@ class PaperExperimentContractTests(unittest.TestCase):
             rows = read_jsonl(ledger)
             masks = {tuple(row["condition"]["mask"]) for row in rows}
             self.assertIn((), masks)
-            self.assertEqual(len(rows), 1 + len(self.base.evidence))
+            critical = [atom for atom in self.base.evidence if atom.role == "critical"]
+            self.assertEqual(len(rows), 1 + len(critical))
+            self.assertTrue(
+                all(
+                    not row["condition"]["mask"]
+                    or row["scenario"]["mask_roles"] == {"critical": len(row["condition"]["mask"])}
+                    for row in rows
+                )
+            )
             report = summarize(rows)
             self.assertEqual(report["boundary"]["eligible_scenarios"], 1)
             self.assertEqual(report["boundary"]["right_censored"], 1)
+
+    def test_paper_protocol_combines_recovery_and_critical_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "paper.jsonl"
+            settings = ExperimentSettings(
+                protocol="paper", repetitions=1, max_mask_size=2, scenario_id=self.base.id
+            )
+            run_protocol(
+                self.repository,
+                self.dataset,
+                ledger,
+                Path(directory) / "paper.manifest.json",
+                settings,
+                {"adapter": "safe-reference"},
+                lambda seed: SafeReferenceAgent(),
+            )
+            rows = read_jsonl(ledger)
+            critical = [atom for atom in self.base.evidence if atom.role == "critical"]
+            irrelevant = [atom for atom in self.base.evidence if atom.role == "irrelevant"]
+            # The unified protocol reuses singleton/full and exhausts ALL
+            # critical subsets, independently of the legacy max_mask_size.
+            expected_recovery = 4 * (1 + len(critical) + len(irrelevant))
+            expected_boundary = 2 ** len(critical) - 1 - len(critical)
+            trials = [r for r in rows if r["record_type"] == "trial"]
+            tasks = [r for r in rows if r["record_type"] == "task_completed"]
+            self.assertEqual(len(trials), expected_recovery + expected_boundary)
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0]["boundary"]["sbm"], 1)
+            self.assertEqual({row["protocol"] for row in trials}, {"boundary-recovery"})
 
 
 if __name__ == "__main__":

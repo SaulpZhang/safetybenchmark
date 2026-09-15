@@ -61,7 +61,7 @@ class ExperimentSettings:
     limit: int | None = None
 
     def public_dict(self) -> dict[str, object]:
-        return {
+        values = {
             "protocol": self.protocol,
             "repetitions": self.repetitions,
             "max_mask_size": self.max_mask_size,
@@ -73,6 +73,11 @@ class ExperimentSettings:
             "scenario_id": self.scenario_id,
             "limit": self.limit,
         }
+        if self.protocol in {"paper", "boundary-recovery"}:
+            values.update(protocol="boundary-recovery", protocol_version=2,
+                          max_mask_size="all_critical", breach_threshold="observed_binary",
+                          search_seed=self.seed if self.seed is not None else 0)
+        return values
 
 
 @dataclass(frozen=True)
@@ -105,6 +110,38 @@ class WandbSink:
         except ImportError as error:
             raise RuntimeError("Install wandb or omit --wandb-project") from error
         self._run = wandb.init(project=project, entity=entity, name=run_name, config=config)
+        if config.get("settings", {}).get("protocol") == "boundary-recovery":
+            self._run.define_metric("task_index")
+            self._run.define_metric("current/*", step_metric="task_index")
+            self._run.define_metric("cumulative/*", step_metric="task_index")
+            self._run.define_metric("coverage/*", step_metric="task_index")
+
+    def log_task(self, task: dict[str, Any], aggregate: dict[str, Any]) -> None:
+        if self._run is None:
+            return
+        payload: dict[str, Any] = {"task_index": task["task_index"]}
+        for name, metric in task["metrics"].items():
+            if metric["value"] is not None:
+                payload[f"current/{name}"] = metric["value"]
+        for name, metric in aggregate["metrics"].items():
+            payload[f"coverage/{name}/tasks"] = metric["tasks"]
+            if metric["estimate"] is not None:
+                payload[f"cumulative/{name}"] = metric["estimate"]
+        self._run.log(payload)
+        self._run.summary.update({k: v for k, v in payload.items() if not k.startswith("current/")})
+
+    def log_final_metrics(self, aggregate: dict[str, Any]) -> None:
+        if self._run is None:
+            return
+        values: dict[str, Any] = {}
+        for name, metric in aggregate["metrics"].items():
+            if metric["estimate"] is not None:
+                values[f"final/{name}/estimate"] = metric["estimate"]
+                values[f"final/{name}/tasks"] = metric["tasks"]
+                values[f"final/{name}/families"] = metric["families"]
+                if metric["ci95"] is not None:
+                    values[f"final/{name}/ci95_low"], values[f"final/{name}/ci95_high"] = metric["ci95"]
+        self._run.summary.update(values)
 
     def log_trial(self, row: dict[str, object]) -> None:
         if self._run is None:
@@ -192,6 +229,9 @@ def write_manifest(
         "agent": agent_metadata,
         "suite": repository.summary(),
     }
+    if settings.protocol in {"paper", "boundary-recovery"}:
+        payload["source_sha256"] = _canonical_hash({
+            p.name: p.read_text() for p in sorted(Path(__file__).parent.glob("*.py"))})
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not resume:
@@ -199,6 +239,8 @@ def write_manifest(
         for key in ("dataset_sha256", "code_revision", "prompt_sha256", "settings_sha256", "agent"):
             if existing.get(key) != payload[key]:
                 raise ValueError(f"resume manifest mismatch for {key}")
+        if payload.get("source_sha256") != existing.get("source_sha256"):
+            raise ValueError("resume manifest mismatch for source_sha256")
         return existing
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -345,23 +387,30 @@ class ProtocolRunner:
             full_rate = self._unsafe_rate(full)
             if full_rate is None or full_rate >= self.settings.breach_threshold:
                 continue
-            atoms = tuple(sorted(atom.id for atom in scenario.evidence))
-            singleton_breach = False
-            for atom_id in atoms:
-                rows = self.run_condition(
-                    TrialCondition("boundary", scenario.id, "semantic_suppression", (atom_id,), "singleton")
-                )
-                rate = self._unsafe_rate(rows)
-                singleton_breach = singleton_breach or (
-                    rate is not None and rate >= self.settings.breach_threshold
-                )
-            if singleton_breach or self.settings.max_mask_size < 2:
-                continue
-            for size in range(2, self.settings.max_mask_size + 1):
+            # The safety boundary is defined over safety-relevant evidence
+            # rather than all task context.
+            atoms = tuple(sorted(atom.id for atom in scenario.evidence if atom.role == "critical"))
+            # Search increasing mask sizes and stop at the first observed
+            # breach, yielding the minimum observed boundary without testing
+            # unnecessary larger combinations.
+            for size in range(1, min(self.settings.max_mask_size, len(atoms)) + 1):
+                size_breach = False
                 for mask in itertools.combinations(atoms, size):
-                    self.run_condition(
-                        TrialCondition("boundary", scenario.id, "semantic_suppression", mask, f"pair-{size}")
+                    rows = self.run_condition(
+                        TrialCondition(
+                            "boundary",
+                            scenario.id,
+                            "semantic_suppression",
+                            mask,
+                            "critical" if size == 1 else f"critical-{size}",
+                        )
                     )
+                    rate = self._unsafe_rate(rows)
+                    size_breach = size_breach or (
+                        rate is not None and rate >= self.settings.breach_threshold
+                    )
+                if size_breach:
+                    break
 
     def recovery(self, base_scenarios: list[Scenario]) -> None:
         for base in base_scenarios:
@@ -412,10 +461,13 @@ def run_protocol(
     wandb_entity: str | None = None,
     wandb_run_name: str | None = None,
 ) -> dict[str, object]:
+    if settings.protocol in {"paper", "boundary-recovery"} and settings.repetitions != 1:
+        raise ValueError("boundary-recovery requires --repetitions 1")
     ledger = TrialLedger(ledger_path, resume=resume)
     manifest = write_manifest(manifest_path, repository, dataset, settings, agent_metadata, resume)
     wandb = WandbSink(wandb_project, wandb_entity, wandb_run_name, {"settings": settings.public_dict(), "suite": repository.summary()})
     runner = ProtocolRunner(repository, ledger, settings, manifest, agent_builder, wandb)
+    extra: dict[str, Any] = {}
     try:
         if settings.protocol == "calibration":
             runner.calibration(select_scenarios(repository, settings, paired=True))
@@ -423,6 +475,9 @@ def run_protocol(
             runner.boundary(select_scenarios(repository, settings, unsafe_only=True))
         elif settings.protocol == "recovery":
             runner.recovery(select_scenarios(repository, settings, unsafe_only=True))
+        elif settings.protocol in {"paper", "boundary-recovery"}:
+            from .unified import run_unified
+            extra = run_unified(runner, select_scenarios(repository, settings, unsafe_only=True, paired=True))
         else:
             raise ValueError(f"unknown protocol: {settings.protocol}")
     finally:
@@ -434,4 +489,5 @@ def run_protocol(
         "executed_trials": runner.executed,
         "skipped_completed_trials": runner.skipped,
         "error_trials": runner.errors,
+        **extra,
     }

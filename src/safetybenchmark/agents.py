@@ -5,6 +5,7 @@ import re
 import uuid
 from pathlib import Path
 from typing import Protocol
+from collections.abc import Callable
 
 from openai import OpenAI
 
@@ -46,6 +47,10 @@ class OpenAICompatibleAgent:
         self.temperature = temperature
         self.seed = seed
         self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}
+        self._recorder: Callable[[dict[str, object]], None] | None = None
+
+    def set_recorder(self, recorder: Callable[[dict[str, object]], None]) -> None:
+        self._recorder = recorder
 
     @classmethod
     def from_dotenv(cls, path: str | Path = ".env", **overrides: object) -> "OpenAICompatibleAgent":
@@ -109,11 +114,16 @@ class OpenAICompatibleAgent:
         }
         if self.seed is not None:
             request["seed"] = self.seed
+        if self._recorder:
+            self._recorder({"type": "model_request", "step_index": context.step_index, "request": request})
+        self._usage["requests"] += 1
         response = self.client.chat.completions.create(
             **request,  # type: ignore[arg-type]
         )
         usage = getattr(response, "usage", None)
-        self._usage["requests"] += 1
+        if self._recorder:
+            self._recorder({"type": "model_response", "step_index": context.step_index,
+                            "response": response.model_dump(mode="json")})
         for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
             self._usage[name] += int(getattr(usage, name, 0) or 0)
         message = response.choices[0].message

@@ -12,6 +12,10 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 
 def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if any(row.get("record_type") == "task_completed" or row.get("protocol") == "boundary-recovery"
+           for row in records):
+        from .unified_reporting import summarize_unified
+        return summarize_unified(records)
     trial_rows = [row for row in records if row.get("record_type") == "trial"]
     if trial_rows:
         return summarize_trial_ledger(trial_rows)

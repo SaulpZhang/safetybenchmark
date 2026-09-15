@@ -124,7 +124,69 @@ track, mask, repetition, and immutable settings hash. A stopped job can use
 The companion manifest freezes the dataset, code, prompt, model configuration,
 and sampling configuration hashes.
 
-Use four rollouts for the preregistered `q=0.5` main analysis:
+Run the complete benchmark **one base task and its safe twin at a time**.
+For each pair, finish full A/B controls, every critical/irrelevant singleton in
+all four cells, higher-order critical search, and recovery at its first boundary
+witness before starting the next pair. Combination search covers up to all of
+that task's critical atoms and stops at the first observed unsafe commit.
+Singletons never early-stop. Full and singleton trials are reused within the run.
+
+```bash
+conda run --no-capture-output -n safety sb experiment \
+  --protocol boundary-recovery --agent openai-compatible --repetitions 1 \
+  --ledger results/v2/boundary-recovery.ledger.jsonl \
+  --wandb-project safetybenchmark --wandb-run-name boundary-recovery-v2
+```
+
+`paper` is an alias for this new protocol. There is no global K: legacy
+`--max-mask-size` and `--breach-threshold` only apply to the old protocols.
+The mask ordering uses `--seed` or zero when omitted; temperature defaults to
+zero. One rollout does not imply a deterministic provider response.
+
+W&B uses **`task_index` (1–300 base/twin pairs)** as the horizontal axis. There
+is one log event per fully completed task: `current/*` contains that task's
+metrics, `cumulative/*` contains equal-task averages so far, and `coverage/*`
+contains each metric's eligible-task count. Full, singleton-critical,
+singleton-irrelevant, and higher-order boundary results are separate. Missing
+denominators are null/omitted, never reported as zero successes. Resume replays
+the completed task points into the new W&B run before continuing.
+
+For `results/v2/boundary-recovery.ledger.jsonl`, local records include:
+
+- The append-only ledger: every attempt start, every completed/error outcome,
+  and each completed task's metric inputs and boundary result.
+- `boundary-recovery.ledger.tasks/<task>/scenario.json`: both expanded worlds,
+  evidence, rules, and manifest for later regrading.
+- `<task>/executions.jsonl`: every finalized attempt for that task, including errors.
+- `<task>/attempts/`: append-only model request/response and tool-event journals,
+  plus full or partial traces; retries get distinct filenames.
+- `<task>/result.json`: every completed condition and grade, witness annotations,
+  boundary result, and within-task metrics with numerators/denominators.
+- `<task>/cumulative_metrics.json`: the completed-prefix metric snapshot.
+- `boundary-recovery.ledger.summary.json`: latest cumulative point estimates.
+
+Model payloads and true-state snapshots stay in local files. W&B receives only
+numeric metrics. If a required trial errors, execution stops at that task. Fix
+the underlying failure and append `--resume` to the same command; successful
+trials are skipped and failed/unfinished attempts retain their records. Use a
+new ledger for this protocol: old recovery ledgers have different manifests and
+cannot be resumed as a unified run.
+
+Recompute all aggregate metrics from the ledger, including 10,000-draw family
+bootstrap confidence intervals, without calling the model:
+
+```bash
+conda run -n safety sb report results/v2/boundary-recovery.ledger.jsonl \
+  --output results/v2/boundary-recovery.report.json
+```
+
+Live per-task curves use point estimates and coverage; at completion,
+10,000-draw family bootstrap intervals are saved in the summary JSON and W&B
+`final/*` summary (without adding another task point). They can also be
+recomputed by the offline report. See [the detailed protocol](docs/unified_boundary_recovery_protocol.md)
+for formulas and metric definitions.
+
+Use the individual protocols below only for pilot or diagnostic runs:
 
 ```bash
 # B1: 600 tasks (unsafe bases and safe twins) under Track A and B full evidence.
@@ -132,8 +194,8 @@ conda run -n safety sb experiment \
   --protocol calibration --agent openai-compatible --repetitions 4 \
   --ledger results/calibration.ledger.jsonl
 
-# B2/B3: unsafe bases only; full, every singleton, then pairs only if no
-# singleton crosses the threshold. Start with one domain before full-suite use.
+# B2/B3: unsafe bases only; full, every critical singleton, then critical pairs
+# only if no singleton crosses the threshold. Start with one domain before full-suite use.
 conda run -n safety sb experiment \
   --protocol boundary --agent openai-compatible --domain finance \
   --repetitions 4 --max-mask-size 2 --breach-threshold 0.5 \

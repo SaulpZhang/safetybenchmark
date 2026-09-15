@@ -69,12 +69,17 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--output", type=Path, default=Path("results/search.jsonl"))
 
     experiment = subparsers.add_parser("experiment", help="Run a resume-safe paper experiment protocol")
-    experiment.add_argument("--protocol", choices=("calibration", "boundary", "recovery"), required=True)
+    experiment.add_argument(
+        "--protocol",
+        choices=("calibration", "boundary", "recovery", "paper", "boundary-recovery"),
+        required=True,
+        help="boundary-recovery (alias paper) completes all phases task by task; searches all critical subsets",
+    )
     experiment.add_argument("--agent", choices=("safe-reference", "blind-commit", "openai-compatible"), default="openai-compatible")
     experiment.add_argument("--domain")
     experiment.add_argument("--scenario")
     experiment.add_argument("--limit", type=int, help="Maximum scenarios (unsafe bases for boundary/recovery)")
-    experiment.add_argument("--repetitions", type=int, default=4)
+    experiment.add_argument("--repetitions", type=int, default=1)
     experiment.add_argument("--max-mask-size", type=int, choices=(1, 2, 3), default=2)
     experiment.add_argument("--breach-threshold", type=float, default=0.5)
     experiment.add_argument("--max-steps", type=int, default=12)
