@@ -45,6 +45,33 @@ MODEL=
 or `LLM_URL`, `LLM_API_KEY`, and `LLM_MODEL`. Secrets are never placed in an
 episode trace.
 
+### Running more than one model
+
+Use one private dotenv profile per provider/model and pass it explicitly with
+`--dotenv`; `.env.*` is git-ignored. Each model needs its **own ledger and W&B
+run**, because the manifest binds the model and non-secret endpoint identity.
+For example:
+
+```dotenv
+# .env.gpt-4.1 (do not commit)
+BASE_URL=https://api.openai.com/v1
+API_KEY=...
+MODEL=gpt-4.1
+```
+
+```bash
+conda run --no-capture-output -n safety sb experiment \
+  --protocol boundary-recovery --agent openai-compatible --repetitions 1 \
+  --dotenv .env.gpt-4.1 \
+  --ledger results/v2/gpt-4.1.ledger.jsonl \
+  --wandb-project safetybenchmark --wandb-run-name gpt-4.1-v2
+```
+
+The same adapter works with any OpenAI-compatible endpoint that supports chat
+tool calls. A provider with a different API (for example, a direct Anthropic or
+Gemini endpoint) needs its own agent adapter; do not point the OpenAI-compatible
+adapter at it unless the provider exposes a compatible endpoint.
+
 ## CLI
 
 Validate or inspect the suite:
@@ -124,16 +151,19 @@ track, mask, repetition, and immutable settings hash. A stopped job can use
 The companion manifest freezes the dataset, code, prompt, model configuration,
 and sampling configuration hashes.
 
-Run the complete benchmark **one base task and its safe twin at a time**.
-For each pair, finish full A/B controls, every critical/irrelevant singleton in
-all four cells, higher-order critical search, and recovery at its first boundary
-witness before starting the next pair. Combination search covers up to all of
-that task's critical atoms and stops at the first observed unsafe commit.
-Singletons never early-stop. Full and singleton trials are reused within the run.
+Run the complete benchmark with four workers by default. **Within each worker,
+one base task and its safe twin remain atomic**: it finishes full A/B controls,
+every critical/irrelevant singleton in all four cells, higher-order critical
+search, and recovery at its first boundary witness before that worker begins
+another pair. Independent pairs may run concurrently. Combination search covers
+up to all of that task's critical atoms and stops at the first observed unsafe
+commit. Singletons never early-stop. Full and singleton trials are reused within
+the run.
 
 ```bash
 conda run --no-capture-output -n safety sb experiment \
   --protocol boundary-recovery --agent openai-compatible --repetitions 1 \
+  --workers 4 \
   --ledger results/v2/boundary-recovery.ledger.jsonl \
   --wandb-project safetybenchmark --wandb-run-name boundary-recovery-v2
 ```
@@ -143,8 +173,10 @@ conda run --no-capture-output -n safety sb experiment \
 The mask ordering uses `--seed` or zero when omitted; temperature defaults to
 zero. One rollout does not imply a deterministic provider response.
 
-W&B uses **`task_index` (1–300 base/twin pairs)** as the horizontal axis. There
-is one log event per fully completed task: `current/*` contains that task's
+W&B uses **`task_index` (1–300 canonical base/twin pairs)** as the horizontal
+axis. The coordinator publishes one log event per fully completed task in that
+fixed order, even when worker completion order differs; `completed_task_count`
+is included as a second progress coordinate. `current/*` contains that task's
 metrics, `cumulative/*` contains equal-task averages so far, and `coverage/*`
 contains each metric's eligible-task count. Full, singleton-critical,
 singleton-irrelevant, and higher-order boundary results are separate. Missing
@@ -153,8 +185,9 @@ the completed task points into the new W&B run before continuing.
 
 For `results/v2/boundary-recovery.ledger.jsonl`, local records include:
 
-- The append-only ledger: every attempt start, every completed/error outcome,
-  and each completed task's metric inputs and boundary result.
+- The append-only global ledger: coordinator-serialized finalized attempts and
+  each completed task's metric inputs and boundary result. Each attempt journal
+  separately records its live start before any model request.
 - `boundary-recovery.ledger.tasks/<task>/scenario.json`: both expanded worlds,
   evidence, rules, and manifest for later regrading.
 - `<task>/executions.jsonl`: every finalized attempt for that task, including errors.
@@ -166,7 +199,9 @@ For `results/v2/boundary-recovery.ledger.jsonl`, local records include:
 - `boundary-recovery.ledger.summary.json`: latest cumulative point estimates.
 
 Model payloads and true-state snapshots stay in local files. W&B receives only
-numeric metrics. If a required trial errors, execution stops at that task. Fix
+numeric metrics. If a required trial errors, the coordinator stops scheduling
+new pairs; up to the other three already-running workers may finish their
+private audit files, but only the completed prefix is published globally. Fix
 the underlying failure and append `--resume` to the same command; successful
 trials are skipped and failed/unfinished attempts retain their records. Use a
 new ledger for this protocol: old recovery ledgers have different manifests and

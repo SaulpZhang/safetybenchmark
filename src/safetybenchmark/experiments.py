@@ -59,6 +59,7 @@ class ExperimentSettings:
     domain: str | None = None
     scenario_id: str | None = None
     limit: int | None = None
+    workers: int = 4
 
     def public_dict(self) -> dict[str, object]:
         values = {
@@ -72,6 +73,7 @@ class ExperimentSettings:
             "domain": self.domain,
             "scenario_id": self.scenario_id,
             "limit": self.limit,
+            "workers": self.workers,
         }
         if self.protocol in {"paper", "boundary-recovery"}:
             values.update(protocol="boundary-recovery", protocol_version=2,
@@ -112,6 +114,7 @@ class WandbSink:
         self._run = wandb.init(project=project, entity=entity, name=run_name, config=config)
         if config.get("settings", {}).get("protocol") == "boundary-recovery":
             self._run.define_metric("task_index")
+            self._run.define_metric("completed_task_count")
             self._run.define_metric("current/*", step_metric="task_index")
             self._run.define_metric("cumulative/*", step_metric="task_index")
             self._run.define_metric("coverage/*", step_metric="task_index")
@@ -119,7 +122,10 @@ class WandbSink:
     def log_task(self, task: dict[str, Any], aggregate: dict[str, Any]) -> None:
         if self._run is None:
             return
-        payload: dict[str, Any] = {"task_index": task["task_index"]}
+        payload: dict[str, Any] = {
+            "task_index": task["task_index"],
+            "completed_task_count": task.get("completed_task_count", task["task_index"]),
+        }
         for name, metric in task["metrics"].items():
             if metric["value"] is not None:
                 payload[f"current/{name}"] = metric["value"]
@@ -193,7 +199,7 @@ class TrialLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-        if row.get("status") == "completed":
+        if row.get("record_type") == "trial" and row.get("status") == "completed":
             self.completed[str(row["trial_key"])] = row
 
     def write_trace(self, trial_key: str, record: EpisodeRecord) -> str:

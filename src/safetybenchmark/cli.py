@@ -73,12 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--protocol",
         choices=("calibration", "boundary", "recovery", "paper", "boundary-recovery"),
         required=True,
-        help="boundary-recovery (alias paper) completes all phases task by task; searches all critical subsets",
+        help="boundary-recovery (alias paper) serializes each task pair and searches all critical subsets",
     )
     experiment.add_argument("--agent", choices=("safe-reference", "blind-commit", "openai-compatible"), default="openai-compatible")
     experiment.add_argument("--domain")
     experiment.add_argument("--scenario")
     experiment.add_argument("--limit", type=int, help="Maximum scenarios (unsafe bases for boundary/recovery)")
+    experiment.add_argument("--workers", type=int, default=4,
+                            help="Parallel base/twin task workers for boundary-recovery (default: 4)")
     experiment.add_argument("--repetitions", type=int, default=1)
     experiment.add_argument("--max-mask-size", type=int, choices=(1, 2, 3), default=2)
     experiment.add_argument("--breach-threshold", type=float, default=0.5)
@@ -177,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "experiment":
         if args.repetitions < 1:
             raise ValueError("--repetitions must be positive")
+        if args.workers < 1:
+            raise ValueError("--workers must be positive")
         if not 0 < args.breach_threshold <= 1:
             raise ValueError("--breach-threshold must be in (0, 1]")
         settings = ExperimentSettings(
@@ -190,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
             domain=args.domain,
             scenario_id=args.scenario,
             limit=args.limit,
+            workers=args.workers,
         )
         manifest = args.manifest or args.ledger.with_suffix(".manifest.json")
         metadata: dict[str, object] = {
@@ -202,6 +207,10 @@ def main(argv: list[str] | None = None) -> int:
 
             values = load_dotenv(args.dotenv)
             metadata["model"] = values.get("MODEL") or values.get("LLM_MODEL") or "unknown"
+            # This is non-secret provenance: it distinguishes identically named
+            # models served by different compatible providers. API keys remain
+            # outside manifests, ledgers, and W&B.
+            metadata["base_url"] = values.get("BASE_URL") or values.get("LLM_URL") or "unknown"
         result = run_protocol(
             repository,
             args.dataset,

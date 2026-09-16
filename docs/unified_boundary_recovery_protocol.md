@@ -478,10 +478,13 @@ listed in the implementation contract below.
 ## Implementation status
 
 Implemented as `sb experiment --protocol boundary-recovery` (`paper` is an
-alias). The outer loop is the base task, not the phase: finish Phases 0–3 for
-one pair before advancing to the next. Legacy `recovery` remains available for
-standalone singleton experiments. The unified protocol requires one rollout
-per condition and ignores legacy global mask-size/threshold settings.
+alias). It uses four workers by default. The worker unit is the base task, not
+the phase: each worker finishes Phases 0–3 for one pair before receiving its
+next pair, while independent pairs may run concurrently. A single coordinator
+is the only global-ledger and W&B writer; it publishes completed pairs in fixed
+source task order. Legacy `recovery` remains available for standalone singleton
+experiments. The unified protocol requires one rollout per condition and
+ignores legacy global mask-size/threshold settings.
 
 ### Runnable command
 
@@ -493,6 +496,7 @@ conda run --no-capture-output -n safety sb experiment \
   --protocol boundary-recovery \
   --agent openai-compatible \
   --repetitions 1 \
+  --workers 4 \
   --ledger results/v2/boundary-recovery.ledger.jsonl \
   --wandb-project safetybenchmark \
   --wandb-run-name boundary-recovery-v2
@@ -500,17 +504,18 @@ conda run --no-capture-output -n safety sb experiment \
 
 Append `--resume` when continuing the same ledger/configuration. A new W&B run
 receives the prior completed task points in order before new task points. A
-trial failure stops the current task and prevents later tasks from starting;
-no failed or incomplete trial is counted as safe. A prior legacy recovery
-ledger cannot be resumed with the new protocol, because its manifest and trial
-identity differ. No automatic cross-protocol import is performed.
+trial failure stops new task scheduling; already-running workers may complete
+their private audit records, but no task beyond the completed prefix is
+published. No failed or incomplete trial is counted as safe. A prior legacy
+recovery ledger cannot be resumed with the new protocol, because its manifest
+and trial identity differ. No automatic cross-protocol import is performed.
 
 ### Actual record layout
 
 For ledger `results/v2/boundary-recovery.ledger.jsonl`:
 
 ```text
-boundary-recovery.ledger.jsonl          all trial starts, outcomes, task completions
+boundary-recovery.ledger.jsonl          coordinator-serialized final attempts, task completions
 boundary-recovery.ledger.manifest.json  dataset/settings/source hashes
 boundary-recovery.ledger.summary.json   latest cumulative point estimates
 boundary-recovery.ledger.tasks/
@@ -525,9 +530,13 @@ boundary-recovery.ledger.tasks/
       <trial key>.<attempt id>.trace.json  complete or partial trace
 ```
 
-The global ledger is authoritative. `trial_started` plus no corresponding
-final attempt row means the process was interrupted; its partial journal still
-exists. Retried attempts use distinct IDs and files. Each completed trial saves
+The global ledger is authoritative for coordinator-received final attempts and
+published task results. A worker writes `attempt_started` to its private journal
+before calling the model, then flushes its final outcome to that task's
+`executions.jsonl`; the coordinator serializes a matching `trial_started` and
+final row when it receives the worker result. Thus a hard interruption can
+leave only a private started journal, which is retained for audit and retried on
+resume. Retried attempts use distinct IDs and files. Each completed trial saves
 grade, execution diagnostics, timing, token/request counts, mask identity,
 phase, world, pair, family, and provenance. Each task-completion record saves
 the exact trial keys used in its metrics, boundary mask, and boundary status.

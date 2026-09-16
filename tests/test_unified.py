@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,10 +23,11 @@ class UnifiedTests(unittest.TestCase):
         cls.dataset = Path("data/generated/v1-300.jsonl")
         cls.repository = ScenarioRepository.from_jsonl(cls.dataset)
 
-    def run_case(self, directory, limit=2, resume=False):
+    def run_case(self, directory, limit=2, resume=False, workers=4):
         return run_protocol(self.repository, self.dataset, Path(directory) / "run.jsonl",
                             Path(directory) / "manifest.json",
-                            ExperimentSettings(protocol="boundary-recovery", repetitions=1, limit=limit),
+                            ExperimentSettings(protocol="boundary-recovery", repetitions=1, limit=limit,
+                                               workers=workers),
                             {"adapter": "test"}, lambda seed: object(), resume=resume,
                             wandb_project="test")
 
@@ -96,6 +98,31 @@ class UnifiedTests(unittest.TestCase):
             self.assertEqual(result["executed_trials"], 0)
             self.assertEqual((Path(d) / "run.jsonl").read_bytes(), before)
 
+    def test_pairs_overlap_on_workers_but_publish_in_source_task_order(self):
+        """A blocked first pair must not stop another worker from beginning pair two."""
+        first_base, second_base = [s for s in self.repository.list() if s.world_type == "unsafe"][:2]
+        first_started, second_started = threading.Event(), threading.Event()
+        once = threading.Event()
+        original = self.fake_episode
+
+        def episode(agent, environment, spec, recorder=None):
+            if spec.scenario_id == first_base.id and not once.is_set():
+                once.set()
+                first_started.set()
+                self.assertTrue(second_started.wait(timeout=5), "second worker never started")
+            elif spec.scenario_id == second_base.id:
+                second_started.set()
+            return original(agent, environment, spec, recorder)
+
+        with tempfile.TemporaryDirectory() as d, patch("safetybenchmark.experiments.WandbSink", self.sink()), \
+             patch("safetybenchmark.unified.run_episode", side_effect=episode), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.run_case(d, workers=2)
+        self.assertTrue(first_started.is_set())
+        self.assertTrue(second_started.is_set())
+        # The coordinator intentionally restores a monotonic public task axis.
+        self.assertEqual(self.logged, [(1, 1), (2, 2)])
+
     def test_error_stops_current_task_and_preserves_retry_attempt(self):
         with tempfile.TemporaryDirectory() as d, patch("safetybenchmark.experiments.WandbSink", self.sink()), \
              contextlib.redirect_stdout(io.StringIO()):
@@ -110,9 +137,13 @@ class UnifiedTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "incomplete"):
                     self.run_case(d)
             rows = read_jsonl(Path(d) / "run.jsonl")
-            self.assertTrue(all(r["task_index"] == 1 for r in rows))
-            self.assertEqual(self.logged, [])
             error = next(r for r in rows if r.get("status") == "error")
+            error_index = error["task_index"]
+            completed_indices = [r["task_index"] for r in rows if r.get("record_type") == "task_completed"]
+            # A parallel worker may have completed an earlier pair, but the
+            # coordinator never publishes a task after the failed prefix.
+            self.assertEqual(completed_indices, list(range(1, error_index)))
+            self.assertTrue(all(r["task_index"] <= error_index for r in rows if "task_index" in r))
             old_trace = (Path(d) / error["trace_path"]).read_bytes()
             with patch("safetybenchmark.unified.run_episode", side_effect=self.fake_episode):
                 self.run_case(d, resume=True)
@@ -186,8 +217,10 @@ class UnifiedTests(unittest.TestCase):
                           {"metrics": {"m": {"estimate": .7, "tasks": 2}}})
         run = fake.init.return_value
         run.define_metric.assert_any_call("cumulative/*", step_metric="task_index")
+        run.define_metric.assert_any_call("completed_task_count")
         run.log.assert_called_once()
         self.assertEqual(run.log.call_args.args[0]["task_index"], 2)
+        self.assertEqual(run.log.call_args.args[0]["completed_task_count"], 2)
         self.assertEqual(run.log.call_args.args[0]["cumulative/m"], .7)
 
     def test_adapter_records_full_request_response_and_failed_request_count(self):
