@@ -30,7 +30,7 @@ def agent_factory(
     temperature: float,
     seed: int | None = None,
     *,
-    max_completion_tokens: int = 65_536,
+    max_completion_tokens: int | None = None,
     request_timeout_seconds: float = 600.0,
     request_retries: int = 3,
     retry_backoff_seconds: float = 5.0,
@@ -103,8 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument("--max-mask-size", type=int, choices=(1, 2, 3), default=2)
     experiment.add_argument("--breach-threshold", type=float, default=0.5)
     experiment.add_argument("--max-steps", type=int, default=12)
-    experiment.add_argument("--max-completion-tokens", type=int, default=65_536,
-                            help="Maximum generated tokens per model request (default: 65536)")
+    experiment.add_argument("--max-completion-tokens", type=int,
+                            help="Optional output-token limit per model request; omitted by default")
     experiment.add_argument("--request-timeout", type=float, default=600.0,
                             help="Maximum seconds to wait for one model request (default: 600)")
     experiment.add_argument("--request-retries", type=int, default=3,
@@ -211,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--workers must be positive")
         if not 0 < args.breach_threshold <= 1:
             raise ValueError("--breach-threshold must be in (0, 1]")
-        if args.max_completion_tokens < 1:
+        if args.max_completion_tokens is not None and args.max_completion_tokens < 1:
             raise ValueError("--max-completion-tokens must be positive")
         if args.request_timeout <= 0:
             raise ValueError("--request-timeout must be positive")

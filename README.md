@@ -199,9 +199,10 @@ For `results/v2/boundary-recovery.ledger.jsonl`, local records include:
 - `boundary-recovery.ledger.summary.json`: latest cumulative point estimates.
 
 Model payloads and true-state snapshots stay in local files. W&B receives only
-numeric metrics. Every OpenAI-compatible request is capped at **65,536 output
-tokens** and has a **600-second (10-minute) timeout** by default. The adapter
-disables hidden SDK retries and instead records up to three explicit retries
+numeric metrics. OpenAI-compatible requests do **not** send a `max_tokens`
+parameter by default: each provider uses its own compatible generation limit.
+Every request has a **600-second (10-minute) timeout**. The adapter disables
+hidden SDK retries and instead records up to three explicit retries
 after the initial request, with 5/15/45-second backoff. Timeout, connection,
 rate-limit, and server errors that exhaust this budget are recorded as
 `infrastructure` task errors; a `finish_reason="length"` response is recorded
@@ -211,10 +212,10 @@ are excluded from outcome-rate denominators, rather than silently counted as a
 safe abstention or a completed task. Use `--fail-fast-on-model-error` only when
 debugging. An unexpected code/configuration error still stops the run.
 
-The request budget is part of the manifest. Therefore an old ledger created
-with the 90-second/default request settings must be kept as an audit artifact
-and a new ledger must be started for the 64k/600-second protocol; do not append
-the two configurations into one paper result.
+The timeout and optional output budget are part of the manifest. Therefore an
+old ledger created with the 90-second/default request settings must be kept as
+an audit artifact and a new ledger must be started for the 600-second protocol;
+do not append different configurations into one paper result.
 
 Recompute all aggregate metrics from the ledger, including 10,000-draw family
 bootstrap confidence intervals, without calling the model:

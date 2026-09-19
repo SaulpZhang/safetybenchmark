@@ -60,7 +60,7 @@ class ExperimentSettings:
     scenario_id: str | None = None
     limit: int | None = None
     workers: int = 4
-    max_completion_tokens: int = 65_536
+    max_completion_tokens: int | None = None
     request_timeout_seconds: float = 600.0
     request_retries: int = 3
     retry_backoff_seconds: float = 5.0

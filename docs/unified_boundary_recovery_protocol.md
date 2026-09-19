@@ -504,8 +504,8 @@ conda run --no-capture-output -n safety sb experiment \
 
 Append `--resume` when continuing the same ledger/configuration. A new W&B run
 receives the prior completed task points in order before new task points. A
-request defaults to a 65,536-token output cap and a 600-second timeout. Hidden
-SDK retries are disabled: timeout, connection, rate-limit, and server failures
+request omits `max_tokens` by default, so the provider's own compatible output
+limit applies; each request has a 600-second timeout. Hidden SDK retries are disabled: timeout, connection, rate-limit, and server failures
 are written into the local request journal and retried up to three times after
 the initial request, with 5/15/45-second backoff. An exhausted retry budget
 creates an `infrastructure` task error; a `finish_reason="length"` response

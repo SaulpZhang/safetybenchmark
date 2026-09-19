@@ -31,15 +31,13 @@ class ProviderRequestError(RuntimeError):
 
 
 class GenerationTruncatedError(RuntimeError):
-    """The provider stopped because the configured completion-token cap was reached."""
+    """The provider stopped because its completion-token limit was reached."""
 
     error_category = "generation_truncated"
 
-    def __init__(self, max_completion_tokens: int):
-        super().__init__(
-            "model response reached the configured completion-token limit "
-            f"({max_completion_tokens} tokens)"
-        )
+    def __init__(self, max_completion_tokens: int | None = None):
+        detail = f" ({max_completion_tokens} tokens)" if max_completion_tokens is not None else ""
+        super().__init__(f"model response reached a completion-token limit{detail}")
         self.max_completion_tokens = max_completion_tokens
 
 
@@ -68,14 +66,14 @@ class OpenAICompatibleAgent:
         model: str,
         temperature: float = 0.0,
         timeout: float = 600.0,
-        max_completion_tokens: int = 65_536,
+        max_completion_tokens: int | None = None,
         request_retries: int = 3,
         retry_backoff_seconds: float = 5.0,
         seed: int | None = None,
     ):
         if not base_url or not api_key or not model:
             raise ValueError("LLM base_url, api_key, and model are required")
-        if max_completion_tokens < 1:
+        if max_completion_tokens is not None and max_completion_tokens < 1:
             raise ValueError("max_completion_tokens must be positive")
         if request_retries < 0:
             raise ValueError("request_retries must be non-negative")
@@ -113,7 +111,10 @@ class OpenAICompatibleAgent:
             model=str(overrides.get("model") or values.get("MODEL") or values.get("LLM_MODEL") or ""),
             temperature=float(overrides.get("temperature", 0.0)),
             timeout=float(overrides.get("timeout", 600.0)),
-            max_completion_tokens=int(overrides.get("max_completion_tokens", 65_536)),
+            max_completion_tokens=(
+                int(overrides["max_completion_tokens"])
+                if overrides.get("max_completion_tokens") is not None else None
+            ),
             request_retries=int(overrides.get("request_retries", 3)),
             retry_backoff_seconds=float(overrides.get("retry_backoff_seconds", 5.0)),
             seed=overrides.get("seed") if isinstance(overrides.get("seed"), int) else None,
@@ -167,8 +168,9 @@ class OpenAICompatibleAgent:
             "tools": tools,
             "tool_choice": "auto",
             "temperature": self.temperature,
-            "max_tokens": getattr(self, "max_completion_tokens", 65_536),
         }
+        if getattr(self, "max_completion_tokens", None) is not None:
+            request["max_tokens"] = self.max_completion_tokens
         if self.seed is not None:
             request["seed"] = self.seed
         retries = getattr(self, "request_retries", 3)
@@ -222,9 +224,9 @@ class OpenAICompatibleAgent:
                     "type": "generation_truncated",
                     "step_index": context.step_index,
                     "finish_reason": choice.finish_reason,
-                    "max_completion_tokens": getattr(self, "max_completion_tokens", 65_536),
+                    "max_completion_tokens": getattr(self, "max_completion_tokens", None),
                 })
-            raise GenerationTruncatedError(getattr(self, "max_completion_tokens", 65_536))
+            raise GenerationTruncatedError(getattr(self, "max_completion_tokens", None))
         message = choice.message
         if message.tool_calls:
             call = message.tool_calls[0]

@@ -257,7 +257,7 @@ class UnifiedTests(unittest.TestCase):
         self.assertEqual(agent.run_metrics()["requests"], 2)
         self.assertEqual(agent.run_metrics()["total_tokens"], 13)
 
-    def test_adapter_retries_visible_provider_errors_and_marks_token_limit(self):
+    def test_adapter_retries_visible_provider_errors_and_marks_provider_token_limit(self):
         from openai.types.chat import ChatCompletion
         from safetybenchmark.agents import GenerationTruncatedError, OpenAICompatibleAgent
         from safetybenchmark.environment import SafetyEnvironment
@@ -266,7 +266,7 @@ class UnifiedTests(unittest.TestCase):
 
         agent = OpenAICompatibleAgent.__new__(OpenAICompatibleAgent)
         agent.model, agent.temperature, agent.seed = "fixture", 0., None
-        agent.max_completion_tokens, agent.request_retries, agent.retry_backoff_seconds = 65_536, 3, 5.
+        agent.max_completion_tokens, agent.request_retries, agent.retry_backoff_seconds = None, 3, 5.
         agent._usage = dict(prompt_tokens=0, completion_tokens=0, total_tokens=0, requests=0,
                             request_errors=0, generation_truncations=0)
         records = []
@@ -287,7 +287,7 @@ class UnifiedTests(unittest.TestCase):
         self.assertEqual([r["type"] for r in records], [
             "model_request", "model_error", "model_request", "model_response", "generation_truncated",
         ])
-        self.assertEqual(records[0]["request"]["max_tokens"], 65_536)
+        self.assertNotIn("max_tokens", records[0]["request"])
         self.assertEqual(agent.run_metrics()["requests"], 2)
         self.assertEqual(agent.run_metrics()["request_errors"], 1)
         self.assertEqual(agent.run_metrics()["generation_truncations"], 1)
