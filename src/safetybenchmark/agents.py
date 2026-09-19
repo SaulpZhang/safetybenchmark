@@ -2,18 +2,48 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Protocol
 from collections.abc import Callable
 
-from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, InternalServerError, OpenAI, RateLimitError
 
 from .models import AgentContext, AgentEvent, FinalResponse, ToolCall
 
 
 class Agent(Protocol):
     def next_event(self, context: AgentContext) -> AgentEvent: ...
+
+
+class ProviderRequestError(RuntimeError):
+    """A retryable provider request failed after the configured retry budget."""
+
+    error_category = "infrastructure"
+
+    def __init__(self, error: Exception, attempts: int):
+        super().__init__(
+            f"{type(error).__name__} after {attempts} request attempts: {error}"
+        )
+        self.attempts = attempts
+        self.last_error_type = type(error).__name__
+
+
+class GenerationTruncatedError(RuntimeError):
+    """The provider stopped because the configured completion-token cap was reached."""
+
+    error_category = "generation_truncated"
+
+    def __init__(self, max_completion_tokens: int):
+        super().__init__(
+            "model response reached the configured completion-token limit "
+            f"({max_completion_tokens} tokens)"
+        )
+        self.max_completion_tokens = max_completion_tokens
+
+
+RETRYABLE_PROVIDER_ERRORS = (APITimeoutError, APIConnectionError, InternalServerError, RateLimitError)
 
 
 def load_dotenv(path: str | Path = ".env") -> dict[str, str]:
@@ -37,16 +67,38 @@ class OpenAICompatibleAgent:
         api_key: str,
         model: str,
         temperature: float = 0.0,
-        timeout: float = 90.0,
+        timeout: float = 600.0,
+        max_completion_tokens: int = 65_536,
+        request_retries: int = 3,
+        retry_backoff_seconds: float = 5.0,
         seed: int | None = None,
     ):
         if not base_url or not api_key or not model:
             raise ValueError("LLM base_url, api_key, and model are required")
-        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        if max_completion_tokens < 1:
+            raise ValueError("max_completion_tokens must be positive")
+        if request_retries < 0:
+            raise ValueError("request_retries must be non-negative")
+        if retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must be non-negative")
+        # Retries are implemented below so every failed API request appears in
+        # the attempt journal. SDK retries would otherwise be invisible.
+        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=0)
         self.model = model
         self.temperature = temperature
         self.seed = seed
-        self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}
+        self.timeout = timeout
+        self.max_completion_tokens = max_completion_tokens
+        self.request_retries = request_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self._usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "requests": 0,
+            "request_errors": 0,
+            "generation_truncations": 0,
+        }
         self._recorder: Callable[[dict[str, object]], None] | None = None
 
     def set_recorder(self, recorder: Callable[[dict[str, object]], None]) -> None:
@@ -60,6 +112,10 @@ class OpenAICompatibleAgent:
             api_key=str(overrides.get("api_key") or values.get("API_KEY") or values.get("LLM_API_KEY") or ""),
             model=str(overrides.get("model") or values.get("MODEL") or values.get("LLM_MODEL") or ""),
             temperature=float(overrides.get("temperature", 0.0)),
+            timeout=float(overrides.get("timeout", 600.0)),
+            max_completion_tokens=int(overrides.get("max_completion_tokens", 65_536)),
+            request_retries=int(overrides.get("request_retries", 3)),
+            retry_backoff_seconds=float(overrides.get("retry_backoff_seconds", 5.0)),
             seed=overrides.get("seed") if isinstance(overrides.get("seed"), int) else None,
         )
 
@@ -111,22 +167,65 @@ class OpenAICompatibleAgent:
             "tools": tools,
             "tool_choice": "auto",
             "temperature": self.temperature,
+            "max_tokens": getattr(self, "max_completion_tokens", 65_536),
         }
         if self.seed is not None:
             request["seed"] = self.seed
-        if self._recorder:
-            self._recorder({"type": "model_request", "step_index": context.step_index, "request": request})
-        self._usage["requests"] += 1
-        response = self.client.chat.completions.create(
-            **request,  # type: ignore[arg-type]
-        )
+        retries = getattr(self, "request_retries", 3)
+        max_attempts = retries + 1
+        response = None
+        for attempt in range(1, max_attempts + 1):
+            if self._recorder:
+                self._recorder({
+                    "type": "model_request",
+                    "step_index": context.step_index,
+                    "request_attempt": attempt,
+                    "max_request_attempts": max_attempts,
+                    "request": request,
+                })
+            self._usage["requests"] += 1
+            try:
+                response = self.client.chat.completions.create(
+                    **request,  # type: ignore[arg-type]
+                )
+                break
+            except RETRYABLE_PROVIDER_ERRORS as error:
+                self._usage["request_errors"] += 1
+                will_retry = attempt < max_attempts
+                delay = getattr(self, "retry_backoff_seconds", 5.0) * (3 ** (attempt - 1)) if will_retry else 0.0
+                if self._recorder:
+                    self._recorder({
+                        "type": "model_error",
+                        "step_index": context.step_index,
+                        "request_attempt": attempt,
+                        "max_request_attempts": max_attempts,
+                        "error": {"type": type(error).__name__, "message": str(error)},
+                        "will_retry": will_retry,
+                        "retry_delay_seconds": delay,
+                    })
+                if not will_retry:
+                    raise ProviderRequestError(error, attempt) from error
+                time.sleep(delay)
+        if response is None:  # Defensive: the loop either returns a response or raises.
+            raise RuntimeError("model request loop ended without a response")
         usage = getattr(response, "usage", None)
         if self._recorder:
             self._recorder({"type": "model_response", "step_index": context.step_index,
                             "response": response.model_dump(mode="json")})
         for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
             self._usage[name] += int(getattr(usage, name, 0) or 0)
-        message = response.choices[0].message
+        choice = response.choices[0]
+        if choice.finish_reason == "length":
+            self._usage["generation_truncations"] += 1
+            if self._recorder:
+                self._recorder({
+                    "type": "generation_truncated",
+                    "step_index": context.step_index,
+                    "finish_reason": choice.finish_reason,
+                    "max_completion_tokens": getattr(self, "max_completion_tokens", 65_536),
+                })
+            raise GenerationTruncatedError(getattr(self, "max_completion_tokens", 65_536))
+        message = choice.message
         if message.tool_calls:
             call = message.tool_calls[0]
             try:

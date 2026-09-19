@@ -56,6 +56,8 @@ class UnifiedTests(unittest.TestCase):
             def __init__(inner, *args, **kw): pass
             def log_task(inner, task, aggregate):
                 self.logged.append((task["task_index"], aggregate["completed_tasks"]))
+            def log_task_error(inner, task, completed_task_count):
+                self.logged.append((task["task_index"], completed_task_count))
             def finish(inner): pass
             def log_final_metrics(inner, metrics): pass
         return FakeSink
@@ -152,7 +154,10 @@ class UnifiedTests(unittest.TestCase):
                         if r["record_type"] == "trial" and r["trial_key"] == error["trial_key"]]
             self.assertEqual([r["status"] for r in attempts], ["error", "completed"])
             self.assertNotEqual(attempts[0]["attempt_id"], attempts[1]["attempt_id"])
-            self.assertEqual(self.logged, [(1, 1), (2, 2)])
+            # Depending on whether worker one finished before the injected
+            # failure reached the coordinator, resume may replay its completed
+            # prefix into the new W&B run. The repaired public suffix is fixed.
+            self.assertEqual(self.logged[-2:], [(1, 1), (2, 2)])
 
     def test_full_and_singleton_failures_still_finish_singleton_panel(self):
         original = self.fake_episode
@@ -251,6 +256,64 @@ class UnifiedTests(unittest.TestCase):
         self.assertEqual(records[1]["response"]["usage"]["total_tokens"], 13)
         self.assertEqual(agent.run_metrics()["requests"], 2)
         self.assertEqual(agent.run_metrics()["total_tokens"], 13)
+
+    def test_adapter_retries_visible_provider_errors_and_marks_token_limit(self):
+        from openai.types.chat import ChatCompletion
+        from safetybenchmark.agents import GenerationTruncatedError, OpenAICompatibleAgent
+        from safetybenchmark.environment import SafetyEnvironment
+        from safetybenchmark.models import AgentContext, RunSpec
+        from unittest.mock import MagicMock
+
+        agent = OpenAICompatibleAgent.__new__(OpenAICompatibleAgent)
+        agent.model, agent.temperature, agent.seed = "fixture", 0., None
+        agent.max_completion_tokens, agent.request_retries, agent.retry_backoff_seconds = 65_536, 3, 5.
+        agent._usage = dict(prompt_tokens=0, completion_tokens=0, total_tokens=0, requests=0,
+                            request_errors=0, generation_truncations=0)
+        records = []
+        agent.set_recorder(records.append)
+        response = ChatCompletion.model_validate({
+            "id": "fixture-response", "created": 1, "model": "fixture", "object": "chat.completion",
+            "choices": [{"index": 0, "finish_reason": "length", "message": {"role": "assistant", "content": "long"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 65_536, "total_tokens": 65_546}})
+        agent.client = MagicMock()
+        agent.client.chat.completions.create.side_effect = [RuntimeError("temporary"), response]
+        session = SafetyEnvironment(self.repository).reset(RunSpec(scenario_id=self.repository.list()[0].id))
+        context = AgentContext(session=session, history=[], step_index=0)
+        with patch("safetybenchmark.agents.RETRYABLE_PROVIDER_ERRORS", (RuntimeError,)), \
+             patch("safetybenchmark.agents.time.sleep") as sleep, \
+             self.assertRaises(GenerationTruncatedError):
+            agent.next_event(context)
+        self.assertEqual(sleep.call_args.args[0], 5.)
+        self.assertEqual([r["type"] for r in records], [
+            "model_request", "model_error", "model_request", "model_response", "generation_truncated",
+        ])
+        self.assertEqual(records[0]["request"]["max_tokens"], 65_536)
+        self.assertEqual(agent.run_metrics()["requests"], 2)
+        self.assertEqual(agent.run_metrics()["request_errors"], 1)
+        self.assertEqual(agent.run_metrics()["generation_truncations"], 1)
+
+    def test_infrastructure_error_does_not_stop_later_tasks(self):
+        from safetybenchmark.agents import ProviderRequestError
+
+        with tempfile.TemporaryDirectory() as d, patch("safetybenchmark.experiments.WandbSink", self.sink()), \
+             contextlib.redirect_stdout(io.StringIO()):
+            calls = 0
+
+            def episode(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise ProviderRequestError(RuntimeError("timeout"), 4)
+                return self.fake_episode(*args, **kwargs)
+
+            with patch("safetybenchmark.unified.run_episode", side_effect=episode):
+                result = self.run_case(d, limit=2, workers=1)
+            rows = read_jsonl(Path(d) / "run.jsonl")
+            failures = [row for row in rows if row["record_type"] == "task_error"]
+            completed = [row for row in rows if row["record_type"] == "task_completed"]
+            self.assertEqual(result["failed_tasks"], 1)
+            self.assertEqual(failures[0]["error_category"], "infrastructure")
+            self.assertEqual([row["task_index"] for row in completed], [2])
 
 
 if __name__ == "__main__":

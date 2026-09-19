@@ -81,6 +81,7 @@ class TaskResult:
     executed: int
     skipped: int
     error: str | None = None
+    error_category: str | None = None
 
 
 def _task_directory(root: Path, index: int, pair_id: str) -> Path:
@@ -123,6 +124,15 @@ def _run_task(*, repository: Any, settings: Any, manifest: dict[str, Any], agent
                  if row.get("record_type") == "trial" and row.get("status") == "completed"}
     rows: dict[str, dict[str, Any]] = {}
     executed = skipped = 0
+
+    class TaskIncompleteError(RuntimeError):
+        def __init__(self, row: dict[str, Any]):
+            error = row["error"]
+            super().__init__(
+                f"Task {index} ({base.id}) incomplete: {error['type']}; "
+                f"saved attempt {row['attempt_id']}. Fix the error and rerun with --resume."
+            )
+            self.category = str(error.get("category", "unexpected"))
 
     def trial(scenario: Any, track: str, mask: tuple[str, ...], role: str, phase: str) -> dict[str, Any]:
         nonlocal executed, skipped
@@ -172,7 +182,12 @@ def _run_task(*, repository: Any, settings: Any, manifest: dict[str, Any], agent
             row["status"] = "completed"
         except Exception as error:
             row["status"] = "error"
-            row["error"] = {"type": type(error).__name__, "message": str(error)}
+            category = str(getattr(error, "error_category", "unexpected"))
+            row["error"] = {
+                "type": type(error).__name__,
+                "message": str(error),
+                "category": category,
+            }
             row["grade"] = None
             save_json(trace, {"partial": True, "events": environment.trace(), "error": row["error"]})
         row["agent_metrics"] = _agent_metrics(agent) if agent is not None else {
@@ -185,8 +200,7 @@ def _run_task(*, repository: Any, settings: Any, manifest: dict[str, Any], agent
         executed += 1
         if row["status"] != "completed":
             rows[key] = row
-            raise RuntimeError(f"Task {index} ({base.id}) incomplete: {row['error']['type']}; "
-                               f"saved attempt {attempt}. Fix the error and rerun with --resume.")
+            raise TaskIncompleteError(row)
         completed[key] = row
         rows[key] = row
         return row
@@ -246,10 +260,12 @@ def _run_task(*, repository: Any, settings: Any, manifest: dict[str, Any], agent
                 "boundary": boundary, "trial_keys": list(rows), "metrics": task_metrics(task_rows, boundary)}
         save_json(task_dir / "result.json", {**task, "trials": task_rows})
         return TaskResult(index, base.id, task_rows, task, executed, skipped)
-    except Exception as error:
+    except TaskIncompleteError as error:
         # The actual failed attempt is flushed before trial raises. Completed
         # rows are returned so a global run also remains auditable on failure.
-        return TaskResult(index, base.id, list(rows.values()), None, executed, skipped, str(error))
+        return TaskResult(index, base.id, list(rows.values()), None, executed, skipped, str(error), error.category)
+    except Exception as error:
+        return TaskResult(index, base.id, list(rows.values()), None, executed, skipped, str(error), "unexpected")
 
 
 def _commit_trial_rows(runner: Any, rows: list[dict[str, Any]]) -> None:
@@ -292,6 +308,31 @@ def _commit_task(runner: Any, root: Path, result: TaskResult, summaries: list[di
                       "cumulative_sbm": aggregate["metrics"]["boundary/sbm"]["estimate"]}), flush=True)
 
 
+def _commit_error_task(runner: Any, root: Path, result: TaskResult, summaries: list[dict[str, Any]]) -> None:
+    """Publish a non-fatal model failure without claiming a completed task."""
+    _commit_trial_rows(runner, result.rows)
+    runner.executed += result.executed
+    runner.skipped += result.skipped
+    runner.errors += 1
+    task = {
+        "record_type": "task_error",
+        "schema_version": 2,
+        "status": "error",
+        "task_index": result.index,
+        "pair_id": result.pair_id,
+        "finished_at": now(),
+        "error": result.error,
+        "error_category": result.error_category,
+        "trial_keys": [row["trial_key"] for row in result.rows],
+    }
+    save_json(_task_directory(root, result.index, result.pair_id) / "result.error.json", task)
+    runner.ledger.append(task)
+    runner.wandb.log_task_error(task, len(summaries))
+    print(json.dumps({"task_index": result.index, "completed_task_count": len(summaries),
+                      "pair_id": result.pair_id, "status": "error",
+                      "error_category": result.error_category}), flush=True)
+
+
 def run_unified(runner: Any, scenarios: list[Any]) -> dict[str, Any]:
     """Run independent pairs concurrently and publish a deterministic task prefix."""
     if runner.settings.repetitions != 1:
@@ -325,6 +366,7 @@ def run_unified(runner: Any, scenarios: list[Any]) -> dict[str, Any]:
     iterator = iter(todo)
     in_flight: dict[Future[TaskResult], int] = {}
     failure: TaskResult | None = None
+    nonfatal_failures = 0
     worker_count = min(runner.settings.workers, len(todo))
     if worker_count:
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="sb-task") as executor:
@@ -349,14 +391,22 @@ def run_unified(runner: Any, scenarios: list[Any]) -> dict[str, Any]:
                         result = future.result()
                     except Exception as error:  # before an attempt could be journaled
                         result = TaskResult(index, scenarios[index - 1].id, [], None, 0, 0,
-                                            f"worker crashed: {type(error).__name__}: {error}")
+                                            f"worker crashed: {type(error).__name__}: {error}", "unexpected")
                     ready[index] = result
-                    if result.error is not None:
+                    if result.error is not None and not (
+                        runner.settings.continue_on_model_error
+                        and result.error_category in {"infrastructure", "generation_truncated"}
+                    ):
                         failure = result if failure is None or result.index < failure.index else failure
                 # Commit only in source task order: W&B task_index stays a
                 # correct, monotonic x-axis despite out-of-order completion.
                 while failure is None and next_commit in ready:
-                    _commit_task(runner, root, ready.pop(next_commit), summaries, len(scenarios))
+                    ordered = ready.pop(next_commit)
+                    if ordered.error is None:
+                        _commit_task(runner, root, ordered, summaries, len(scenarios))
+                    else:
+                        _commit_error_task(runner, root, ordered, summaries)
+                        nonfatal_failures += 1
                     next_commit += 1
                 if failure is None:
                     while len(in_flight) < worker_count and submit_one():
@@ -384,5 +434,5 @@ def run_unified(runner: Any, scenarios: list[Any]) -> dict[str, Any]:
     final_metrics = aggregate_tasks(summaries, draws=10_000)
     save_json(ledger.path.with_suffix(".summary.json"), final_metrics)
     runner.wandb.log_final_metrics(final_metrics)
-    return {"completed_tasks": len(summaries), "task_results_dir": str(root),
+    return {"completed_tasks": len(summaries), "failed_tasks": nonfatal_failures, "task_results_dir": str(root),
             "summary": str(ledger.path.with_suffix(".summary.json"))}

@@ -504,9 +504,16 @@ conda run --no-capture-output -n safety sb experiment \
 
 Append `--resume` when continuing the same ledger/configuration. A new W&B run
 receives the prior completed task points in order before new task points. A
-trial failure stops new task scheduling; already-running workers may complete
-their private audit records, but no task beyond the completed prefix is
-published. No failed or incomplete trial is counted as safe. A prior legacy
+request defaults to a 65,536-token output cap and a 600-second timeout. Hidden
+SDK retries are disabled: timeout, connection, rate-limit, and server failures
+are written into the local request journal and retried up to three times after
+the initial request, with 5/15/45-second backoff. An exhausted retry budget
+creates an `infrastructure` task error; a `finish_reason="length"` response
+creates a `generation_truncated` task error. Both publish one W&B error event
+at their source `task_index`, preserve all attempt data, and let later
+independent pairs proceed. They never contribute to outcome-rate denominators.
+Use `--fail-fast-on-model-error` only to restore debugging fail-fast behavior;
+unexpected implementation/configuration failures remain fatal. A prior legacy
 recovery ledger cannot be resumed with the new protocol, because its manifest
 and trial identity differ. No automatic cross-protocol import is performed.
 

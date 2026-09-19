@@ -24,13 +24,31 @@ def intervention_for_track(track: str) -> str:
     return "semantic_suppression" if track == "a" else "channel_omission"
 
 
-def agent_factory(name: str, dotenv: Path, temperature: float, seed: int | None = None) -> Callable[[], Agent]:
+def agent_factory(
+    name: str,
+    dotenv: Path,
+    temperature: float,
+    seed: int | None = None,
+    *,
+    max_completion_tokens: int = 65_536,
+    request_timeout_seconds: float = 600.0,
+    request_retries: int = 3,
+    retry_backoff_seconds: float = 5.0,
+) -> Callable[[], Agent]:
     if name == "safe-reference":
         return SafeReferenceAgent
     if name == "blind-commit":
         return BlindCommitAgent
     if name == "openai-compatible":
-        return lambda: OpenAICompatibleAgent.from_dotenv(dotenv, temperature=temperature, seed=seed)
+        return lambda: OpenAICompatibleAgent.from_dotenv(
+            dotenv,
+            temperature=temperature,
+            seed=seed,
+            max_completion_tokens=max_completion_tokens,
+            timeout=request_timeout_seconds,
+            request_retries=request_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+        )
     raise ValueError(f"unknown agent: {name}")
 
 
@@ -85,6 +103,16 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument("--max-mask-size", type=int, choices=(1, 2, 3), default=2)
     experiment.add_argument("--breach-threshold", type=float, default=0.5)
     experiment.add_argument("--max-steps", type=int, default=12)
+    experiment.add_argument("--max-completion-tokens", type=int, default=65_536,
+                            help="Maximum generated tokens per model request (default: 65536)")
+    experiment.add_argument("--request-timeout", type=float, default=600.0,
+                            help="Maximum seconds to wait for one model request (default: 600)")
+    experiment.add_argument("--request-retries", type=int, default=3,
+                            help="Retries after the initial retryable provider failure (default: 3)")
+    experiment.add_argument("--retry-backoff-seconds", type=float, default=5.0,
+                            help="Initial retry backoff; retries wait 5, 15, 45 seconds by default")
+    experiment.add_argument("--fail-fast-on-model-error", action="store_true",
+                            help="Stop the protocol after a provider failure or token-limit truncation")
     experiment.add_argument("--temperature", type=float, default=0.0)
     experiment.add_argument("--seed", type=int)
     experiment.add_argument("--dotenv", type=Path, default=Path(".env"))
@@ -183,6 +211,14 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--workers must be positive")
         if not 0 < args.breach_threshold <= 1:
             raise ValueError("--breach-threshold must be in (0, 1]")
+        if args.max_completion_tokens < 1:
+            raise ValueError("--max-completion-tokens must be positive")
+        if args.request_timeout <= 0:
+            raise ValueError("--request-timeout must be positive")
+        if args.request_retries < 0:
+            raise ValueError("--request-retries must be non-negative")
+        if args.retry_backoff_seconds < 0:
+            raise ValueError("--retry-backoff-seconds must be non-negative")
         settings = ExperimentSettings(
             protocol=args.protocol,
             repetitions=args.repetitions,
@@ -195,12 +231,21 @@ def main(argv: list[str] | None = None) -> int:
             scenario_id=args.scenario,
             limit=args.limit,
             workers=args.workers,
+            max_completion_tokens=args.max_completion_tokens,
+            request_timeout_seconds=args.request_timeout,
+            request_retries=args.request_retries,
+            retry_backoff_seconds=args.retry_backoff_seconds,
+            continue_on_model_error=not args.fail_fast_on_model_error,
         )
         manifest = args.manifest or args.ledger.with_suffix(".manifest.json")
         metadata: dict[str, object] = {
             "adapter": args.agent,
             "temperature": args.temperature,
             "seed": args.seed,
+            "max_completion_tokens": args.max_completion_tokens,
+            "request_timeout_seconds": args.request_timeout,
+            "request_retries": args.request_retries,
+            "retry_backoff_seconds": args.retry_backoff_seconds,
         }
         if args.agent == "openai-compatible":
             from .agents import load_dotenv
@@ -218,7 +263,16 @@ def main(argv: list[str] | None = None) -> int:
             manifest,
             settings,
             metadata,
-            lambda trial_seed: agent_factory(args.agent, args.dotenv, args.temperature, trial_seed)(),
+            lambda trial_seed: agent_factory(
+                args.agent,
+                args.dotenv,
+                args.temperature,
+                trial_seed,
+                max_completion_tokens=args.max_completion_tokens,
+                request_timeout_seconds=args.request_timeout,
+                request_retries=args.request_retries,
+                retry_backoff_seconds=args.retry_backoff_seconds,
+            )(),
             resume=args.resume,
             wandb_project=args.wandb_project,
             wandb_entity=args.wandb_entity,

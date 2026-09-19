@@ -60,6 +60,11 @@ class ExperimentSettings:
     scenario_id: str | None = None
     limit: int | None = None
     workers: int = 4
+    max_completion_tokens: int = 65_536
+    request_timeout_seconds: float = 600.0
+    request_retries: int = 3
+    retry_backoff_seconds: float = 5.0
+    continue_on_model_error: bool = True
 
     def public_dict(self) -> dict[str, object]:
         values = {
@@ -74,6 +79,11 @@ class ExperimentSettings:
             "scenario_id": self.scenario_id,
             "limit": self.limit,
             "workers": self.workers,
+            "max_completion_tokens": self.max_completion_tokens,
+            "request_timeout_seconds": self.request_timeout_seconds,
+            "request_retries": self.request_retries,
+            "retry_backoff_seconds": self.retry_backoff_seconds,
+            "continue_on_model_error": self.continue_on_model_error,
         }
         if self.protocol in {"paper", "boundary-recovery"}:
             values.update(protocol="boundary-recovery", protocol_version=2,
@@ -136,6 +146,22 @@ class WandbSink:
         self._run.log(payload)
         self._run.summary.update({k: v for k, v in payload.items() if not k.startswith("current/")})
 
+    def log_task_error(self, task: dict[str, Any], completed_task_count: int) -> None:
+        """Keep the W&B x-axis aligned with source task order after a model failure."""
+        if self._run is None:
+            return
+        payload = {
+            "task_index": task["task_index"],
+            "completed_task_count": completed_task_count,
+            "coverage/tasks_attempted": task["task_index"],
+            "coverage/tasks_completed": completed_task_count,
+            "error/task_failed": 1,
+            "error/infrastructure": int(task.get("error_category") == "infrastructure"),
+            "error/generation_truncated": int(task.get("error_category") == "generation_truncated"),
+        }
+        self._run.log(payload)
+        self._run.summary.update({k: v for k, v in payload.items() if k != "task_index"})
+
     def log_final_metrics(self, aggregate: dict[str, Any]) -> None:
         if self._run is None:
             return
@@ -152,7 +178,7 @@ class WandbSink:
     def log_trial(self, row: dict[str, object]) -> None:
         if self._run is None:
             return
-        grade = row.get("grade", {})
+        grade = row.get("grade") or {}
         assert isinstance(grade, dict)
         usage = row.get("agent_metrics", {})
         assert isinstance(usage, dict)
