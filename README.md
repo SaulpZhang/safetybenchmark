@@ -67,10 +67,30 @@ conda run --no-capture-output -n safety sb experiment \
   --wandb-project safetybenchmark --wandb-run-name gpt-4.1-v2
 ```
 
-The same adapter works with any OpenAI-compatible endpoint that supports chat
-tool calls. A provider with a different API (for example, a direct Anthropic or
-Gemini endpoint) needs its own agent adapter; do not point the OpenAI-compatible
-adapter at it unless the provider exposes a compatible endpoint.
+The `openai-compatible` agent automatically selects the native Google
+`google-genai` SDK when `MODEL` starts with `gemini` (case-insensitive).
+For these models no URL is required; any `BASE_URL` is ignored:
+
+```dotenv
+# .env.gemini38flash (do not commit)
+API_KEY=your-google-gemini-api-key
+MODEL=gemini-3.8-flash
+```
+
+`GEMINI_API_KEY` and `GOOGLE_API_KEY` are also accepted when `API_KEY` /
+`LLM_API_KEY` are absent. Use a Google Gemini Developer API key, not an
+OpenRouter key. The model ID must be available to that Google account.
+Names such as `google/gemini-3.8-flash` do **not** start with `gemini` and
+continue to use the configured OpenAI-compatible gateway.
+Native Gemini tool calls are executed one at a time by the benchmark, with
+automatic SDK tool execution/retries disabled. Opaque thought signatures,
+requests/responses/errors and token usage (including thinking tokens) are
+preserved in records. Timeout and explicit retry settings remain the same.
+Use a separate ledger when switching providers; existing OpenRouter runs
+must not be resumed with a Google key.
+
+Other models keep using the OpenAI-compatible endpoint and require a URL.
+A direct Anthropic endpoint still needs its own adapter.
 
 ## CLI
 

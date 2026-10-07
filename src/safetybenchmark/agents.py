@@ -105,10 +105,16 @@ class OpenAICompatibleAgent:
     @classmethod
     def from_dotenv(cls, path: str | Path = ".env", **overrides: object) -> "OpenAICompatibleAgent":
         values = load_dotenv(path)
-        return cls(
+        model = str(overrides.get("model") or values.get("MODEL") or values.get("LLM_MODEL") or "")
+        adapter = cls
+        if model.lower().startswith("gemini"):
+            from .gemini import GeminiAgent
+            adapter = GeminiAgent
+        return adapter(
             base_url=str(overrides.get("base_url") or values.get("BASE_URL") or values.get("LLM_URL") or ""),
-            api_key=str(overrides.get("api_key") or values.get("API_KEY") or values.get("LLM_API_KEY") or ""),
-            model=str(overrides.get("model") or values.get("MODEL") or values.get("LLM_MODEL") or ""),
+            api_key=str(overrides.get("api_key") or values.get("API_KEY") or values.get("LLM_API_KEY")
+                        or values.get("GEMINI_API_KEY") or values.get("GOOGLE_API_KEY") or ""),
+            model=model,
             temperature=float(overrides.get("temperature", 0.0)),
             timeout=float(overrides.get("timeout", 600.0)),
             max_completion_tokens=(

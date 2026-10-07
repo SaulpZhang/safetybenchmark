@@ -256,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
             # models served by different compatible providers. API keys remain
             # outside manifests, ledgers, and W&B.
             metadata["base_url"] = values.get("BASE_URL") or values.get("LLM_URL") or "unknown"
+            if str(metadata["model"]).lower().startswith("gemini"):
+                metadata["base_url"] = "https://generativelanguage.googleapis.com"
+                metadata["provider"] = "google-genai"
         result = run_protocol(
             repository,
             args.dataset,
